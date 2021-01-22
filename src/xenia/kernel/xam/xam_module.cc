@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2019 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -19,23 +19,18 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
+std::atomic<int> xam_dialogs_shown_ = {0};
+
+bool xeXamIsUIActive() { return xam_dialogs_shown_ > 0; }
+
 XamModule::XamModule(Emulator* emulator, KernelState* kernel_state)
     : KernelModule(kernel_state, "xe:\\xam.xex"), loader_data_() {
   RegisterExportTable(export_resolver_);
 
-  // Register all exported functions.
-  RegisterAvatarExports(export_resolver_, kernel_state_);
-  RegisterContentExports(export_resolver_, kernel_state_);
-  RegisterInfoExports(export_resolver_, kernel_state_);
-  RegisterInputExports(export_resolver_, kernel_state_);
-  RegisterMsgExports(export_resolver_, kernel_state_);
-  RegisterNetExports(export_resolver_, kernel_state_);
-  RegisterNotifyExports(export_resolver_, kernel_state_);
-  RegisterNuiExports(export_resolver_, kernel_state_);
-  RegisterUIExports(export_resolver_, kernel_state_);
-  RegisterUserExports(export_resolver_, kernel_state_);
-  RegisterVideoExports(export_resolver_, kernel_state_);
-  RegisterVoiceExports(export_resolver_, kernel_state_);
+#define XE_MODULE_EXPORT_GROUP(m, n) \
+  Register##n##Exports(export_resolver_, kernel_state_);
+#include "xam_module_export_groups.inc"
+#undef XE_MODULE_EXPORT_GROUP
 }
 
 std::vector<xe::cpu::Export*> xam_exports(4096);

@@ -9,6 +9,7 @@
 
 #include <cstring>
 
+#include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/kernel/kernel_state.h"
@@ -31,10 +32,10 @@ uint32_t ToXdkProtectFlags(uint32_t protect) {
     result = X_PAGE_READWRITE;
   }
   if (protect & kMemoryProtectNoCache) {
-    result = X_PAGE_NOCACHE;
+    result |= X_PAGE_NOCACHE;
   }
   if (protect & kMemoryProtectWriteCombine) {
-    result = X_PAGE_WRITECOMBINE;
+    result |= X_PAGE_WRITECOMBINE;
   }
   return result;
 }
@@ -42,10 +43,10 @@ uint32_t ToXdkProtectFlags(uint32_t protect) {
 uint32_t FromXdkProtectFlags(uint32_t protect) {
   uint32_t result = 0;
   if ((protect & X_PAGE_READONLY) | (protect & X_PAGE_EXECUTE_READ)) {
-    result |= kMemoryProtectRead;
+    result = kMemoryProtectRead;
   } else if ((protect & X_PAGE_READWRITE) |
              (protect & X_PAGE_EXECUTE_READWRITE)) {
-    result |= kMemoryProtectRead | kMemoryProtectWrite;
+    result = kMemoryProtectRead | kMemoryProtectWrite;
   }
   if (protect & X_PAGE_NOCACHE) {
     result |= kMemoryProtectNoCache;
@@ -56,29 +57,22 @@ uint32_t FromXdkProtectFlags(uint32_t protect) {
   return result;
 }
 
-SHIM_CALL NtAllocateVirtualMemory_shim(PPCContext* ppc_context,
-                                       KernelState* kernel_state) {
-  uint32_t base_addr_ptr = SHIM_GET_ARG_32(0);
-  uint32_t base_addr_value = SHIM_MEM_32(base_addr_ptr);
-  uint32_t region_size_ptr = SHIM_GET_ARG_32(1);
-  uint32_t region_size_value = SHIM_MEM_32(region_size_ptr);
-  uint32_t alloc_type = SHIM_GET_ARG_32(2);    // X_MEM_* bitmask
-  uint32_t protect_bits = SHIM_GET_ARG_32(3);  // X_PAGE_* bitmask
-  uint32_t unknown = SHIM_GET_ARG_32(4);
-
-  XELOGD("NtAllocateVirtualMemory(%.8X(%.8X), %.8X(%.8X), %.8X, %.8X, %.8X)",
-         base_addr_ptr, base_addr_value, region_size_ptr, region_size_value,
-         alloc_type, protect_bits, unknown);
-
+dword_result_t NtAllocateVirtualMemory(lpdword_t base_addr_ptr,
+                                       lpdword_t region_size_ptr,
+                                       dword_t alloc_type, dword_t protect_bits,
+                                       dword_t debug_memory) {
   // NTSTATUS
   // _Inout_  PVOID *BaseAddress,
   // _Inout_  PSIZE_T RegionSize,
   // _In_     ULONG AllocationType,
   // _In_     ULONG Protect
-  // ? handle?
+  // _In_     BOOLEAN DebugMemory
 
-  // I've only seen zero.
-  assert_true(unknown == 0);
+  assert_not_null(base_addr_ptr);
+  assert_not_null(region_size_ptr);
+
+  // Set to TRUE when allocation is from devkit memory area.
+  assert_true(debug_memory == 0);
 
   // This allocates memory from the kernel heap, which is initialized on startup
   // and shared by both the kernel implementation and user code.
@@ -86,19 +80,16 @@ SHIM_CALL NtAllocateVirtualMemory_shim(PPCContext* ppc_context,
   // it's simple today we could extend it to do better things in the future.
 
   // Must request a size.
-  if (!region_size_value) {
-    SHIM_SET_RETURN_32(X_STATUS_INVALID_PARAMETER);
-    return;
+  if (!base_addr_ptr || !region_size_ptr) {
+    return X_STATUS_INVALID_PARAMETER;
   }
   // Check allocation type.
   if (!(alloc_type & (X_MEM_COMMIT | X_MEM_RESET | X_MEM_RESERVE))) {
-    SHIM_SET_RETURN_32(X_STATUS_INVALID_PARAMETER);
-    return;
+    return X_STATUS_INVALID_PARAMETER;
   }
   // If MEM_RESET is set only MEM_RESET can be set.
   if (alloc_type & X_MEM_RESET && (alloc_type & ~X_MEM_RESET)) {
-    SHIM_SET_RETURN_32(X_STATUS_INVALID_PARAMETER);
-    return;
+    return X_STATUS_INVALID_PARAMETER;
   }
   // Don't allow games to set execute bits.
   if (protect_bits & (X_PAGE_EXECUTE | X_PAGE_EXECUTE_READ |
@@ -106,23 +97,29 @@ SHIM_CALL NtAllocateVirtualMemory_shim(PPCContext* ppc_context,
     XELOGW("Game setting EXECUTE bit on allocation");
   }
 
-  // Adjust size.
-  uint32_t page_size = 4096;
-  if (alloc_type & X_MEM_LARGE_PAGES) {
-    page_size = 64 * 1024;
+  uint32_t page_size;
+  if (*base_addr_ptr != 0) {
+    // ignore specified page size when base address is specified.
+    auto heap = kernel_memory()->LookupHeap(*base_addr_ptr);
+    if (heap->heap_type() != HeapType::kGuestVirtual) {
+      return X_STATUS_INVALID_PARAMETER;
+    }
+    page_size = heap->page_size();
+  } else {
+    // Adjust size.
+    page_size = 4 * 1024;
+    if (alloc_type & X_MEM_LARGE_PAGES) {
+      page_size = 64 * 1024;
+    }
   }
-  if (int32_t(region_size_value) < 0) {
-    // Some games pass in negative sizes.
-    region_size_value = -int32_t(region_size_value);
-  }
-  uint32_t adjusted_size = xe::round_up(region_size_value, page_size);
 
-  // Some games (BF1943) do this, but then if we return an error code it'll
-  // allocate with a smaller page size.
-  if (base_addr_value % page_size != 0) {
-    SHIM_SET_RETURN_32(X_STATUS_MAPPED_ALIGNMENT);
-    return;
-  }
+  // Round the base address down to the nearest page boundary.
+  uint32_t adjusted_base = *base_addr_ptr - (*base_addr_ptr % page_size);
+  // For some reason, some games pass in negative sizes.
+  uint32_t adjusted_size = int32_t(*region_size_ptr) < 0
+                               ? -int32_t(region_size_ptr.value())
+                               : region_size_ptr.value();
+  adjusted_size = xe::round_up(adjusted_size, page_size);
 
   // Allocate.
   uint32_t allocation_type = 0;
@@ -138,69 +135,128 @@ SHIM_CALL NtAllocateVirtualMemory_shim(PPCContext* ppc_context,
   }
   uint32_t protect = FromXdkProtectFlags(protect_bits);
   uint32_t address = 0;
-  if (base_addr_value) {
-    auto heap = kernel_state->memory()->LookupHeap(base_addr_value);
-    if (heap->AllocFixed(base_addr_value, adjusted_size, page_size,
+  BaseHeap* heap;
+
+  if (adjusted_base != 0) {
+    heap = kernel_memory()->LookupHeap(adjusted_base);
+    if (heap->page_size() != page_size) {
+      // Specified the wrong page size for the wrong heap.
+      return X_STATUS_ACCESS_DENIED;
+    }
+
+    if (heap->AllocFixed(adjusted_base, adjusted_size, page_size,
                          allocation_type, protect)) {
-      address = base_addr_value;
+      address = adjusted_base;
     }
   } else {
     bool top_down = !!(alloc_type & X_MEM_TOP_DOWN);
-    auto heap = kernel_state->memory()->LookupHeapByType(false, page_size);
+    heap = kernel_memory()->LookupHeapByType(false, page_size);
     heap->Alloc(adjusted_size, page_size, allocation_type, protect, top_down,
                 &address);
   }
   if (!address) {
     // Failed - assume no memory available.
-    SHIM_SET_RETURN_32(X_STATUS_NO_MEMORY);
-    return;
+    return X_STATUS_NO_MEMORY;
   }
 
   // Zero memory, if needed.
   if (address && !(alloc_type & X_MEM_NOZERO)) {
     if (alloc_type & X_MEM_COMMIT) {
-      kernel_state->memory()->Zero(address, adjusted_size);
+      if (!(protect & kMemoryProtectWrite)) {
+        heap->Protect(address, adjusted_size,
+                      kMemoryProtectRead | kMemoryProtectWrite);
+      }
+      kernel_memory()->Zero(address, adjusted_size);
+      if (!(protect & kMemoryProtectWrite)) {
+        heap->Protect(address, adjusted_size, protect);
+      }
     }
   }
 
-  XELOGD("NtAllocateVirtualMemory = %.8X", address);
+  XELOGD("NtAllocateVirtualMemory = {:08X}", address);
 
   // Stash back.
   // Maybe set X_STATUS_ALREADY_COMMITTED if MEM_COMMIT?
-  SHIM_SET_MEM_32(base_addr_ptr, address);
-  SHIM_SET_MEM_32(region_size_ptr, adjusted_size);
-  SHIM_SET_RETURN_32(X_STATUS_SUCCESS);
+  *base_addr_ptr = address;
+  *region_size_ptr = adjusted_size;
+  return X_STATUS_SUCCESS;
 }
+DECLARE_XBOXKRNL_EXPORT1(NtAllocateVirtualMemory, kMemory, kImplemented);
 
-SHIM_CALL NtFreeVirtualMemory_shim(PPCContext* ppc_context,
-                                   KernelState* kernel_state) {
-  uint32_t base_addr_ptr = SHIM_GET_ARG_32(0);
-  uint32_t base_addr_value = SHIM_MEM_32(base_addr_ptr);
-  uint32_t region_size_ptr = SHIM_GET_ARG_32(1);
-  uint32_t region_size_value = SHIM_MEM_32(region_size_ptr);
+dword_result_t NtProtectVirtualMemory(lpdword_t base_addr_ptr,
+                                      lpdword_t region_size_ptr,
+                                      dword_t protect_bits,
+                                      lpdword_t old_protect,
+                                      dword_t debug_memory) {
+  // Set to TRUE when this memory refers to devkit memory area.
+  assert_true(debug_memory == 0);
+
+  // Must request a size.
+  if (!base_addr_ptr || !region_size_ptr) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+
+  // Don't allow games to set execute bits.
+  if (protect_bits & (X_PAGE_EXECUTE | X_PAGE_EXECUTE_READ |
+                      X_PAGE_EXECUTE_READWRITE | X_PAGE_EXECUTE_WRITECOPY)) {
+    XELOGW("Game setting EXECUTE bit on protect");
+    return X_STATUS_ACCESS_DENIED;
+  }
+
+  auto heap = kernel_memory()->LookupHeap(*base_addr_ptr);
+  if (heap->heap_type() != HeapType::kGuestVirtual) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  // Adjust the base downwards to the nearest page boundary.
+  uint32_t adjusted_base =
+      *base_addr_ptr - (*base_addr_ptr % heap->page_size());
+  uint32_t adjusted_size = xe::round_up(*region_size_ptr, heap->page_size());
+  uint32_t protect = FromXdkProtectFlags(protect_bits);
+
+  uint32_t tmp_old_protect = 0;
+
+  // FIXME: I think it's valid for NtProtectVirtualMemory to span regions, but
+  // as of now our implementation will fail in this case. Need to verify.
+  if (!heap->Protect(adjusted_base, adjusted_size, protect, &tmp_old_protect)) {
+    return X_STATUS_ACCESS_DENIED;
+  }
+
+  // Write back output variables.
+  *base_addr_ptr = adjusted_base;
+  *region_size_ptr = adjusted_size;
+
+  if (old_protect) {
+    *old_protect = tmp_old_protect;
+  }
+
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(NtProtectVirtualMemory, kMemory, kImplemented);
+
+dword_result_t NtFreeVirtualMemory(lpdword_t base_addr_ptr,
+                                   lpdword_t region_size_ptr, dword_t free_type,
+                                   dword_t debug_memory) {
+  uint32_t base_addr_value = *base_addr_ptr;
+  uint32_t region_size_value = *region_size_ptr;
   // X_MEM_DECOMMIT | X_MEM_RELEASE
-  uint32_t free_type = SHIM_GET_ARG_32(2);
-  uint32_t unknown = SHIM_GET_ARG_32(3);
-
-  XELOGD("NtFreeVirtualMemory(%.8X(%.8X), %.8X(%.8X), %.8X, %.8X)",
-         base_addr_ptr, base_addr_value, region_size_ptr, region_size_value,
-         free_type, unknown);
 
   // NTSTATUS
   // _Inout_  PVOID *BaseAddress,
   // _Inout_  PSIZE_T RegionSize,
   // _In_     ULONG FreeType
-  // ? handle?
+  // _In_     BOOLEAN DebugMemory
 
-  // I've only seen zero.
-  assert_true(unknown == 0);
+  // Set to TRUE when freeing external devkit memory.
+  assert_true(debug_memory == 0);
 
   if (!base_addr_value) {
-    SHIM_SET_RETURN_32(X_STATUS_MEMORY_NOT_ALLOCATED);
-    return;
+    return X_STATUS_MEMORY_NOT_ALLOCATED;
   }
 
-  auto heap = kernel_state->memory()->LookupHeap(base_addr_value);
+  auto heap = kernel_state()->memory()->LookupHeap(base_addr_value);
+  if (heap->heap_type() != HeapType::kGuestVirtual) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
   bool result = false;
   if (free_type == X_MEM_DECOMMIT) {
     // If zero, we may need to query size (free whole region).
@@ -212,14 +268,14 @@ SHIM_CALL NtFreeVirtualMemory_shim(PPCContext* ppc_context,
     result = heap->Release(base_addr_value, &region_size_value);
   }
   if (!result) {
-    SHIM_SET_RETURN_32(X_STATUS_UNSUCCESSFUL);
-    return;
+    return X_STATUS_UNSUCCESSFUL;
   }
 
-  SHIM_SET_MEM_32(base_addr_ptr, base_addr_value);
-  SHIM_SET_MEM_32(region_size_ptr, region_size_value);
-  SHIM_SET_RETURN_32(X_STATUS_SUCCESS);
+  *base_addr_ptr = base_addr_value;
+  *region_size_ptr = region_size_value;
+  return X_STATUS_SUCCESS;
 }
+DECLARE_XBOXKRNL_EXPORT1(NtFreeVirtualMemory, kMemory, kImplemented);
 
 struct X_MEMORY_BASIC_INFORMATION {
   be<uint32_t> base_address;
@@ -231,65 +287,53 @@ struct X_MEMORY_BASIC_INFORMATION {
   be<uint32_t> type;
 };
 
-SHIM_CALL NtQueryVirtualMemory_shim(PPCContext* ppc_context,
-                                    KernelState* kernel_state) {
-  uint32_t base_address = SHIM_GET_ARG_32(0);
-  uint32_t memory_basic_information_ptr = SHIM_GET_ARG_32(1);
-  auto memory_basic_information =
-      SHIM_STRUCT(X_MEMORY_BASIC_INFORMATION, memory_basic_information_ptr);
-
-  XELOGD("NtQueryVirtualMemory(%.8X, %.8X)", base_address,
-         memory_basic_information_ptr);
-
-  auto heap = kernel_state->memory()->LookupHeap(base_address);
+dword_result_t NtQueryVirtualMemory(
+    dword_t base_address,
+    pointer_t<X_MEMORY_BASIC_INFORMATION> memory_basic_information_ptr) {
+  auto heap = kernel_state()->memory()->LookupHeap(base_address);
   HeapAllocationInfo alloc_info;
   if (heap == nullptr || !heap->QueryRegionInfo(base_address, &alloc_info)) {
-    SHIM_SET_RETURN_32(X_STATUS_INVALID_PARAMETER);
-    return;
+    return X_STATUS_INVALID_PARAMETER;
   }
 
-  memory_basic_information->base_address =
-      static_cast<uint32_t>(alloc_info.base_address);
-  memory_basic_information->allocation_base =
-      static_cast<uint32_t>(alloc_info.allocation_base);
-  memory_basic_information->allocation_protect =
+  memory_basic_information_ptr->base_address = alloc_info.base_address;
+  memory_basic_information_ptr->allocation_base = alloc_info.allocation_base;
+  memory_basic_information_ptr->allocation_protect =
       ToXdkProtectFlags(alloc_info.allocation_protect);
-  memory_basic_information->region_size =
-      static_cast<uint32_t>(alloc_info.region_size);
-  uint32_t x_state = 0;
-  if (alloc_info.state & kMemoryAllocationReserve) {
-    x_state |= X_MEM_RESERVE;
-  }
+  memory_basic_information_ptr->region_size = alloc_info.region_size;
+  // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information
+  // State: ... This member can be one of the following values: MEM_COMMIT,
+  // MEM_FREE, MEM_RESERVE.
+  // State queried by Beautiful Katamari before displaying the loading screen.
+  uint32_t x_state;
   if (alloc_info.state & kMemoryAllocationCommit) {
-    x_state |= X_MEM_COMMIT;
+    assert_not_zero(alloc_info.state & kMemoryAllocationReserve);
+    x_state = X_MEM_COMMIT;
+  } else if (alloc_info.state & kMemoryAllocationReserve) {
+    x_state = X_MEM_RESERVE;
+  } else {
+    x_state = X_MEM_FREE;
   }
-  memory_basic_information->state = x_state;
-  memory_basic_information->protect = ToXdkProtectFlags(alloc_info.protect);
-  memory_basic_information->type = alloc_info.type;
+  memory_basic_information_ptr->state = x_state;
+  memory_basic_information_ptr->protect = ToXdkProtectFlags(alloc_info.protect);
+  memory_basic_information_ptr->type = X_MEM_PRIVATE;
 
-  SHIM_SET_RETURN_32(X_STATUS_SUCCESS);
+  return X_STATUS_SUCCESS;
 }
+DECLARE_XBOXKRNL_EXPORT1(NtQueryVirtualMemory, kMemory, kImplemented);
 
-SHIM_CALL MmAllocatePhysicalMemoryEx_shim(PPCContext* ppc_context,
-                                          KernelState* kernel_state) {
-  uint32_t type = SHIM_GET_ARG_32(0);
-  uint32_t region_size = SHIM_GET_ARG_32(1);
-  uint32_t protect_bits = SHIM_GET_ARG_32(2);
-  uint32_t min_addr_range = SHIM_GET_ARG_32(3);
-  uint32_t max_addr_range = SHIM_GET_ARG_32(4);
-  uint32_t alignment = SHIM_GET_ARG_32(5);
-
-  XELOGD("MmAllocatePhysicalMemoryEx(%d, %.8X, %.8X, %.8X, %.8X, %.8X)", type,
-         region_size, protect_bits, min_addr_range, max_addr_range, alignment);
-
+dword_result_t MmAllocatePhysicalMemoryEx(dword_t flags, dword_t region_size,
+                                          dword_t protect_bits,
+                                          dword_t min_addr_range,
+                                          dword_t max_addr_range,
+                                          dword_t alignment) {
   // Type will usually be 0 (user request?), where 1 and 2 are sometimes made
   // by D3D/etc.
 
   // Check protection bits.
   if (!(protect_bits & (X_PAGE_READONLY | X_PAGE_READWRITE))) {
     XELOGE("MmAllocatePhysicalMemoryEx: bad protection bits");
-    SHIM_SET_RETURN_32(0);
-    return;
+    return 0;
   }
 
   // Either may be OR'ed into protect_bits:
@@ -314,81 +358,87 @@ SHIM_CALL MmAllocatePhysicalMemoryEx_shim(PPCContext* ppc_context,
   uint32_t adjusted_size = xe::round_up(region_size, page_size);
   uint32_t adjusted_alignment = xe::round_up(alignment, page_size);
 
-  // Callers can pick an address to allocate with min_addr_range/max_addr_range
-  // and the memory must be allocated there. I haven't seen a game do this,
-  // and instead they all do min=0 / max=-1 to indicate the system should pick.
-  // If we have to suport arbitrary placement things will get nasty.
-
   uint32_t allocation_type = kMemoryAllocationReserve | kMemoryAllocationCommit;
   uint32_t protect = FromXdkProtectFlags(protect_bits);
   bool top_down = true;
-  auto heap = kernel_state->memory()->LookupHeapByType(true, page_size);
+  auto heap = static_cast<PhysicalHeap*>(
+      kernel_memory()->LookupHeapByType(true, page_size));
+  // min_addr_range/max_addr_range are bounds in physical memory, not virtual.
+  uint32_t heap_base = heap->heap_base();
+  uint32_t heap_physical_address_offset = heap->GetPhysicalAddress(heap_base);
+  uint32_t heap_min_addr =
+      xe::sat_sub(min_addr_range.value(), heap_physical_address_offset);
+  uint32_t heap_max_addr =
+      xe::sat_sub(max_addr_range.value(), heap_physical_address_offset);
+  uint32_t heap_size = heap->heap_size();
+  heap_min_addr = heap_base + std::min(heap_min_addr, heap_size - 1);
+  heap_max_addr = heap_base + std::min(heap_max_addr, heap_size - 1);
   uint32_t base_address;
-  if (!heap->AllocRange(min_addr_range, max_addr_range, adjusted_size,
+  if (!heap->AllocRange(heap_min_addr, heap_max_addr, adjusted_size,
                         adjusted_alignment, allocation_type, protect, top_down,
                         &base_address)) {
     // Failed - assume no memory available.
-    SHIM_SET_RETURN_32(0);
-    return;
+    return 0;
   }
-  XELOGD("MmAllocatePhysicalMemoryEx = %.8X", base_address);
+  XELOGD("MmAllocatePhysicalMemoryEx = {:08X}", base_address);
 
-  SHIM_SET_RETURN_32(base_address);
+  return base_address;
 }
+DECLARE_XBOXKRNL_EXPORT1(MmAllocatePhysicalMemoryEx, kMemory, kImplemented);
 
-SHIM_CALL MmFreePhysicalMemory_shim(PPCContext* ppc_context,
-                                    KernelState* kernel_state) {
-  uint32_t type = SHIM_GET_ARG_32(0);
-  uint32_t base_address = SHIM_GET_ARG_32(1);
+dword_result_t MmAllocatePhysicalMemory(dword_t flags, dword_t region_size,
+                                        dword_t protect_bits) {
+  return MmAllocatePhysicalMemoryEx(flags, region_size, protect_bits, 0,
+                                    0xFFFFFFFFu, 0);
+}
+DECLARE_XBOXKRNL_EXPORT1(MmAllocatePhysicalMemory, kMemory, kImplemented);
 
-  XELOGD("MmFreePhysicalAddress(%d, %.8X)", type, base_address);
-
+void MmFreePhysicalMemory(dword_t type, dword_t base_address) {
   // base_address = result of MmAllocatePhysicalMemory.
 
   assert_true((base_address & 0x1F) == 0);
 
-  auto heap = kernel_state->memory()->LookupHeap(base_address);
+  auto heap = kernel_state()->memory()->LookupHeap(base_address);
   heap->Release(base_address);
 }
+DECLARE_XBOXKRNL_EXPORT1(MmFreePhysicalMemory, kMemory, kImplemented);
 
-SHIM_CALL MmQueryAddressProtect_shim(PPCContext* ppc_context,
-                                     KernelState* kernel_state) {
-  uint32_t base_address = SHIM_GET_ARG_32(0);
-
-  XELOGD("MmQueryAddressProtect(%.8X)", base_address);
-
-  auto heap = kernel_state->memory()->LookupHeap(base_address);
+dword_result_t MmQueryAddressProtect(dword_t base_address) {
+  auto heap = kernel_state()->memory()->LookupHeap(base_address);
   uint32_t access;
   if (!heap->QueryProtect(base_address, &access)) {
     access = 0;
   }
-  access = ToXdkProtectFlags(access);
+  access = !access ? 0 : ToXdkProtectFlags(access);
 
-  SHIM_SET_RETURN_32(access);
+  return access;
 }
+DECLARE_XBOXKRNL_EXPORT2(MmQueryAddressProtect, kMemory, kImplemented,
+                         kHighFrequency);
 
 void MmSetAddressProtect(lpvoid_t base_address, dword_t region_size,
                          dword_t protect_bits) {
+  if (!protect_bits) {
+    XELOGE("MmSetAddressProtect: Failed due to incorrect protect_bits");
+    return;
+  }
+
   uint32_t protect = FromXdkProtectFlags(protect_bits);
   auto heap = kernel_memory()->LookupHeap(base_address);
   heap->Protect(base_address.guest_address(), region_size, protect);
 }
-DECLARE_XBOXKRNL_EXPORT(MmSetAddressProtect, ExportTag::kMemory);
+DECLARE_XBOXKRNL_EXPORT1(MmSetAddressProtect, kMemory, kImplemented);
 
-SHIM_CALL MmQueryAllocationSize_shim(PPCContext* ppc_context,
-                                     KernelState* kernel_state) {
-  uint32_t base_address = SHIM_GET_ARG_32(0);
-
-  XELOGD("MmQueryAllocationSize(%.8X)", base_address);
-
-  auto heap = kernel_state->memory()->LookupHeap(base_address);
+dword_result_t MmQueryAllocationSize(lpvoid_t base_address) {
+  auto heap = kernel_state()->memory()->LookupHeap(base_address);
   uint32_t size;
   if (!heap->QuerySize(base_address, &size)) {
     size = 0;
   }
 
-  SHIM_SET_RETURN_32(size);
+  return size;
 }
+DECLARE_XBOXKRNL_EXPORT1(MmQueryAllocationSize, kMemory, kImplemented);
 
 // https://code.google.com/p/vdash/source/browse/trunk/vdash/include/kernel.h
 struct X_MM_QUERY_STATISTICS_SECTION {
@@ -415,97 +465,101 @@ struct X_MM_QUERY_STATISTICS_RESULT {
 };
 static_assert_size(X_MM_QUERY_STATISTICS_RESULT, 104);
 
-SHIM_CALL MmQueryStatistics_shim(PPCContext* ppc_context,
-                                 KernelState* kernel_state) {
-  uint32_t stats_ptr = SHIM_GET_ARG_32(0);
-
-  XELOGD("MmQueryStatistics(%.8X)", stats_ptr);
-
-  if (stats_ptr == 0) {
-    SHIM_SET_RETURN_32(X_STATUS_INVALID_PARAMETER);
-    return;
+dword_result_t MmQueryStatistics(
+    pointer_t<X_MM_QUERY_STATISTICS_RESULT> stats_ptr) {
+  if (!stats_ptr) {
+    return X_STATUS_INVALID_PARAMETER;
   }
 
   const uint32_t size = sizeof(X_MM_QUERY_STATISTICS_RESULT);
 
-  auto stats =
-      reinterpret_cast<X_MM_QUERY_STATISTICS_RESULT*>(SHIM_MEM_ADDR(stats_ptr));
-  if (stats->size != size) {
-    SHIM_SET_RETURN_32(X_STATUS_BUFFER_TOO_SMALL);
-    return;
+  if (stats_ptr->size != size) {
+    return X_STATUS_BUFFER_TOO_SMALL;
   }
 
   // Zero out the struct.
-  std::memset(stats, 0, size);
+  stats_ptr.Zero();
 
   // Set the constants the game is likely asking for.
   // These numbers are mostly guessed. If the game is just checking for
   // memory, this should satisfy it. If it's actually verifying things
   // this won't work :/
-  stats->size = size;
+  stats_ptr->size = size;
 
-  stats->total_physical_pages = 0x00020000;
-  stats->kernel_pages = 0x00000300;
+  stats_ptr->total_physical_pages = 0x00020000;  // 512mb / 4kb pages
+  stats_ptr->kernel_pages = 0x00000300;
 
-  stats->title.available_pages = 0x00013300;
-  stats->title.total_virtual_memory_bytes = 0x2FFF0000;
-  stats->title.reserved_virtual_memory_bytes = 0x00160000;
-  stats->title.physical_pages = 0x00001000;
-  stats->title.pool_pages = 0x00000010;
-  stats->title.stack_pages = 0x00000100;
-  stats->title.image_pages = 0x00000100;
-  stats->title.heap_pages = 0x00000100;
-  stats->title.virtual_pages = 0x00000100;
-  stats->title.page_table_pages = 0x00000100;
-  stats->title.cache_pages = 0x00000100;
+  // TODO(gibbed): maybe use LookupHeapByType instead?
+  auto heap_a = kernel_memory()->LookupHeap(0xA0000000);
+  auto heap_c = kernel_memory()->LookupHeap(0xC0000000);
+  auto heap_e = kernel_memory()->LookupHeap(0xE0000000);
 
-  stats->system.available_pages = 0x00000000;
-  stats->system.total_virtual_memory_bytes = 0x00000000;
-  stats->system.reserved_virtual_memory_bytes = 0x00000000;
-  stats->system.physical_pages = 0x00000000;
-  stats->system.pool_pages = 0x00000000;
-  stats->system.stack_pages = 0x00000000;
-  stats->system.image_pages = 0x00000000;
-  stats->system.heap_pages = 0x00000000;
-  stats->system.virtual_pages = 0x00000000;
-  stats->system.page_table_pages = 0x00000000;
-  stats->system.cache_pages = 0x00000000;
+  assert_not_null(heap_a);
+  assert_not_null(heap_c);
+  assert_not_null(heap_e);
 
-  stats->highest_physical_page = 0x0001FFFF;
+#define GET_USED_PAGE_COUNT(x) \
+  (x->GetTotalPageCount() - x->GetUnreservedPageCount())
+#define GET_USED_PAGE_SIZE(x) ((GET_USED_PAGE_COUNT(x) * x->page_size()) / 4096)
+  uint32_t used_pages = 0;
+  used_pages += GET_USED_PAGE_SIZE(heap_a);
+  used_pages += GET_USED_PAGE_SIZE(heap_c);
+  used_pages += GET_USED_PAGE_SIZE(heap_e);
+#undef GET_USED_PAGE_SIZE
+#undef GET_USED_PAGE_COUNT
 
-  SHIM_SET_RETURN_32(X_STATUS_SUCCESS);
+  assert_true(used_pages < stats_ptr->total_physical_pages);
+
+  stats_ptr->title.available_pages =
+      stats_ptr->total_physical_pages - used_pages;
+  stats_ptr->title.total_virtual_memory_bytes =
+      0x2FFF0000;  // TODO(gibbed): FIXME
+  stats_ptr->title.reserved_virtual_memory_bytes =
+      0x00160000;                                // TODO(gibbed): FIXME
+  stats_ptr->title.physical_pages = 0x00001000;  // TODO(gibbed): FIXME
+  stats_ptr->title.pool_pages = 0x00000010;
+  stats_ptr->title.stack_pages = 0x00000100;
+  stats_ptr->title.image_pages = 0x00000100;
+  stats_ptr->title.heap_pages = 0x00000100;
+  stats_ptr->title.virtual_pages = 0x00000100;
+  stats_ptr->title.page_table_pages = 0x00000100;
+  stats_ptr->title.cache_pages = 0x00000100;
+
+  stats_ptr->system.available_pages = 0x00000000;
+  stats_ptr->system.total_virtual_memory_bytes = 0x00000000;
+  stats_ptr->system.reserved_virtual_memory_bytes = 0x00000000;
+  stats_ptr->system.physical_pages = 0x00000000;
+  stats_ptr->system.pool_pages = 0x00000000;
+  stats_ptr->system.stack_pages = 0x00000000;
+  stats_ptr->system.image_pages = 0x00000000;
+  stats_ptr->system.heap_pages = 0x00000000;
+  stats_ptr->system.virtual_pages = 0x00000000;
+  stats_ptr->system.page_table_pages = 0x00000000;
+  stats_ptr->system.cache_pages = 0x00000000;
+
+  stats_ptr->highest_physical_page = 0x0001FFFF;
+
+  return X_STATUS_SUCCESS;
 }
+DECLARE_XBOXKRNL_EXPORT1(MmQueryStatistics, kMemory, kImplemented);
 
-// http://msdn.microsoft.com/en-us/library/windows/hardware/ff554547(v=vs.85).aspx
-SHIM_CALL MmGetPhysicalAddress_shim(PPCContext* ppc_context,
-                                    KernelState* kernel_state) {
-  uint32_t base_address = SHIM_GET_ARG_32(0);
-
-  XELOGD("MmGetPhysicalAddress(%.8X)", base_address);
-
+// https://msdn.microsoft.com/en-us/library/windows/hardware/ff554547(v=vs.85).aspx
+dword_result_t MmGetPhysicalAddress(dword_t base_address) {
   // PHYSICAL_ADDRESS MmGetPhysicalAddress(
   //   _In_  PVOID BaseAddress
   // );
   // base_address = result of MmAllocatePhysicalMemory.
-  assert_true(base_address >= 0xA0000000);
-
-  uint32_t physical_address = base_address & 0x1FFFFFFF;
-  if (base_address >= 0xE0000000) {
-    physical_address += 0x1000;
+  uint32_t physical_address = kernel_memory()->GetPhysicalAddress(base_address);
+  assert_true(physical_address != UINT32_MAX);
+  if (physical_address == UINT32_MAX) {
+    physical_address = 0;
   }
-
-  SHIM_SET_RETURN_32(physical_address);
+  return physical_address;
 }
+DECLARE_XBOXKRNL_EXPORT1(MmGetPhysicalAddress, kMemory, kImplemented);
 
-SHIM_CALL MmMapIoSpace_shim(PPCContext* ppc_context,
-                            KernelState* kernel_state) {
-  uint32_t unk0 = SHIM_GET_ARG_32(0);
-  uint32_t src_address = SHIM_GET_ARG_32(1);  // from MmGetPhysicalAddress
-  uint32_t size = SHIM_GET_ARG_32(2);
-  uint32_t flags = SHIM_GET_ARG_32(3);
-
-  XELOGD("MmMapIoSpace(%.8X, %.8X, %d, %.8X)", unk0, src_address, size, flags);
-
+dword_result_t MmMapIoSpace(dword_t unk0, lpvoid_t src_address, dword_t size,
+                            dword_t flags) {
   // I've only seen this used to map XMA audio contexts.
   // The code seems fine with taking the src address, so this just returns that.
   // If others start using it there could be problems.
@@ -513,17 +567,12 @@ SHIM_CALL MmMapIoSpace_shim(PPCContext* ppc_context,
   assert_true(size == 0x40);
   assert_true(flags == 0x404);
 
-  SHIM_SET_RETURN_32(src_address);
+  return src_address.guest_address();
 }
+DECLARE_XBOXKRNL_EXPORT1(MmMapIoSpace, kMemory, kImplemented);
 
-SHIM_CALL ExAllocatePoolTypeWithTag_shim(PPCContext* ppc_context,
-                                         KernelState* kernel_state) {
-  uint32_t size = SHIM_GET_ARG_32(0);
-  uint32_t tag = SHIM_GET_ARG_32(1);
-  uint32_t zero = SHIM_GET_ARG_32(2);
-
-  XELOGD("ExAllocatePoolTypeWithTag(%d, %.4s, %d)", size, &tag, zero);
-
+dword_result_t ExAllocatePoolTypeWithTag(dword_t size, dword_t tag,
+                                         dword_t zero) {
   uint32_t alignment = 8;
   uint32_t adjusted_size = size;
   if (adjusted_size < 4 * 1024) {
@@ -533,31 +582,37 @@ SHIM_CALL ExAllocatePoolTypeWithTag_shim(PPCContext* ppc_context,
   }
 
   uint32_t addr =
-      kernel_state->memory()->SystemHeapAlloc(adjusted_size, alignment);
+      kernel_state()->memory()->SystemHeapAlloc(adjusted_size, alignment);
 
-  SHIM_SET_RETURN_32(addr);
+  return addr;
 }
+DECLARE_XBOXKRNL_EXPORT1(ExAllocatePoolTypeWithTag, kMemory, kImplemented);
 
-SHIM_CALL ExFreePool_shim(PPCContext* ppc_context, KernelState* kernel_state) {
-  uint32_t base_address = SHIM_GET_ARG_32(0);
-
-  XELOGD("ExFreePool(%.8X)", base_address);
-
-  kernel_state->memory()->SystemHeapFree(base_address);
+dword_result_t ExAllocatePool(dword_t size) {
+  const uint32_t none = 0x656E6F4E;  // 'None'
+  return ExAllocatePoolTypeWithTag(size, none, 0);
 }
+DECLARE_XBOXKRNL_EXPORT1(ExAllocatePool, kMemory, kImplemented);
 
-SHIM_CALL KeLockL2_shim(PPCContext* ppc_context, KernelState* kernel_state) {
-  // Ignored for now. This is just a perf optimization, I think.
-  // It may be useful as a hint for CPU-GPU transfer.
-
-  XELOGD("KeLockL2(?)");
-
-  SHIM_SET_RETURN_32(0);
+void ExFreePool(lpvoid_t base_address) {
+  kernel_state()->memory()->SystemHeapFree(base_address);
 }
+DECLARE_XBOXKRNL_EXPORT1(ExFreePool, kMemory, kImplemented);
 
-SHIM_CALL KeUnlockL2_shim(PPCContext* ppc_context, KernelState* kernel_state) {
-  XELOGD("KeUnlockL2(?)");
+dword_result_t KeGetImagePageTableEntry(lpvoid_t address) {
+  // Unknown
+  return 1;
 }
+DECLARE_XBOXKRNL_EXPORT1(KeGetImagePageTableEntry, kMemory, kStub);
+
+dword_result_t KeLockL2() {
+  // TODO
+  return 0;
+}
+DECLARE_XBOXKRNL_EXPORT1(KeLockL2, kMemory, kStub);
+
+void KeUnlockL2() {}
+DECLARE_XBOXKRNL_EXPORT1(KeUnlockL2, kMemory, kStub);
 
 dword_result_t MmCreateKernelStack(dword_t stack_size, dword_t r4) {
   assert_zero(r4);  // Unknown argument.
@@ -574,7 +629,7 @@ dword_result_t MmCreateKernelStack(dword_t stack_size, dword_t r4) {
                    &stack_address);
   return stack_address + stack_size;
 }
-DECLARE_XBOXKRNL_EXPORT(MmCreateKernelStack, ExportTag::kImplemented);
+DECLARE_XBOXKRNL_EXPORT1(MmCreateKernelStack, kMemory, kImplemented);
 
 dword_result_t MmDeleteKernelStack(lpvoid_t stack_base, lpvoid_t stack_end) {
   // Release the stack (where stack_end is the low address)
@@ -584,28 +639,10 @@ dword_result_t MmDeleteKernelStack(lpvoid_t stack_base, lpvoid_t stack_end) {
 
   return X_STATUS_UNSUCCESSFUL;
 }
-DECLARE_XBOXKRNL_EXPORT(MmDeleteKernelStack, ExportTag::kImplemented);
+DECLARE_XBOXKRNL_EXPORT1(MmDeleteKernelStack, kMemory, kImplemented);
 
 void RegisterMemoryExports(xe::cpu::ExportResolver* export_resolver,
-                           KernelState* kernel_state) {
-  SHIM_SET_MAPPING("xboxkrnl.exe", NtAllocateVirtualMemory, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", NtFreeVirtualMemory, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", NtQueryVirtualMemory, state);
-  // SHIM_SET_MAPPING("xboxkrnl.exe", MmAllocatePhysicalMemory, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", MmAllocatePhysicalMemoryEx, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", MmFreePhysicalMemory, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", MmQueryAddressProtect, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", MmQueryAllocationSize, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", MmQueryStatistics, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", MmGetPhysicalAddress, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", MmMapIoSpace, state);
-
-  SHIM_SET_MAPPING("xboxkrnl.exe", ExAllocatePoolTypeWithTag, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", ExFreePool, state);
-
-  SHIM_SET_MAPPING("xboxkrnl.exe", KeLockL2, state);
-  SHIM_SET_MAPPING("xboxkrnl.exe", KeUnlockL2, state);
-}
+                           KernelState* kernel_state) {}
 
 }  // namespace xboxkrnl
 }  // namespace kernel

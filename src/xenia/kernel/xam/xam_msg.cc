@@ -11,121 +11,130 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_error.h"
 #include "xenia/kernel/xevent.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
 namespace xe {
 namespace kernel {
 namespace xam {
 
-SHIM_CALL XMsgInProcessCall_shim(PPCContext* ppc_context,
-                                 KernelState* kernel_state) {
-  uint32_t app = SHIM_GET_ARG_32(0);
-  uint32_t message = SHIM_GET_ARG_32(1);
-  uint32_t arg1 = SHIM_GET_ARG_32(2);
-  uint32_t arg2 = SHIM_GET_ARG_32(3);
-
-  XELOGD("XMsgInProcessCall(%.8X, %.8X, %.8X, %.8X)", app, message, arg1, arg2);
-
-  auto result = kernel_state->app_manager()->DispatchMessageSync(app, message,
-                                                                 arg1, arg2);
+dword_result_t XMsgInProcessCall(dword_t app, dword_t message, dword_t arg1,
+                                 dword_t arg2) {
+  auto result = kernel_state()->app_manager()->DispatchMessageSync(app, message,
+                                                                   arg1, arg2);
   if (result == X_ERROR_NOT_FOUND) {
-    XELOGE("XMsgInProcessCall: app %.8X undefined", app);
+    XELOGE("XMsgInProcessCall: app {:08X} undefined", app);
   }
-  SHIM_SET_RETURN_32(result);
+  return result;
 }
+DECLARE_XAM_EXPORT1(XMsgInProcessCall, kNone, kImplemented);
 
-SHIM_CALL XMsgSystemProcessCall_shim(PPCContext* ppc_context,
-                                     KernelState* kernel_state) {
-  uint32_t app = SHIM_GET_ARG_32(0);
-  uint32_t message = SHIM_GET_ARG_32(1);
-  uint32_t buffer = SHIM_GET_ARG_32(2);
-  uint32_t buffer_length = SHIM_GET_ARG_32(3);
-
-  XELOGD("XMsgSystemProcessCall(%.8X, %.8X, %.8X, %.8X)", app, message, buffer,
-         buffer_length);
-
-  auto result = kernel_state->app_manager()->DispatchMessageAsync(
+dword_result_t XMsgSystemProcessCall(dword_t app, dword_t message,
+                                     dword_t buffer, dword_t buffer_length) {
+  auto result = kernel_state()->app_manager()->DispatchMessageAsync(
       app, message, buffer, buffer_length);
   if (result == X_ERROR_NOT_FOUND) {
-    XELOGE("XMsgSystemProcessCall: app %.8X undefined", app);
+    XELOGE("XMsgSystemProcessCall: app {:08X} undefined", app);
   }
-  SHIM_SET_RETURN_32(result);
+  return result;
 }
+DECLARE_XAM_EXPORT1(XMsgSystemProcessCall, kNone, kImplemented);
 
-SHIM_CALL XMsgStartIORequest_shim(PPCContext* ppc_context,
-                                  KernelState* kernel_state) {
-  uint32_t app = SHIM_GET_ARG_32(0);
-  uint32_t message = SHIM_GET_ARG_32(1);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(2);
-  uint32_t buffer = SHIM_GET_ARG_32(3);
-  uint32_t buffer_length = SHIM_GET_ARG_32(4);
+struct XMSGSTARTIOREQUEST_UNKNOWNARG {
+  be<uint32_t> unk_0;
+  be<uint32_t> unk_1;
+};
 
-  XELOGD("XMsgStartIORequest(%.8X, %.8X, %.8X, %.8X, %d)", app, message,
-         overlapped_ptr, buffer, buffer_length);
-
-  auto result = kernel_state->app_manager()->DispatchMessageAsync(
-      app, message, buffer, buffer_length);
-  if (result == X_ERROR_NOT_FOUND) {
-    XELOGE("XMsgStartIORequest: app %.8X undefined", app);
+X_HRESULT xeXMsgStartIORequestEx(uint32_t app, uint32_t message,
+                                 uint32_t overlapped_ptr, uint32_t buffer_ptr,
+                                 uint32_t buffer_length,
+                                 XMSGSTARTIOREQUEST_UNKNOWNARG* unknown) {
+  auto result = kernel_state()->app_manager()->DispatchMessageAsync(
+      app, message, buffer_ptr, buffer_length);
+  if (result == X_E_NOTFOUND) {
+    XELOGE("XMsgStartIORequestEx: app {:08X} undefined", app);
+    result = X_E_INVALIDARG;
+    XThread::SetLastError(X_ERROR_NOT_FOUND);
   }
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
     result = X_ERROR_IO_PENDING;
   }
-  SHIM_SET_RETURN_32(result);
+  if (result == X_ERROR_SUCCESS || X_ERROR_IO_PENDING) {
+    XThread::SetLastError(0);
+  }
+  return result;
 }
 
-SHIM_CALL XMsgStartIORequestEx_shim(PPCContext* ppc_context,
-                                    KernelState* kernel_state) {
-  uint32_t app = SHIM_GET_ARG_32(0);
-  uint32_t message = SHIM_GET_ARG_32(1);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(2);
-  uint32_t buffer = SHIM_GET_ARG_32(3);
-  uint32_t buffer_length = SHIM_GET_ARG_32(4);
-  uint32_t unknown_ptr = SHIM_GET_ARG_32(5);
-
-  XELOGD("XMsgStartIORequestEx(%.8X, %.8X, %.8X, %.8X, %d, %.8X)", app, message,
-         overlapped_ptr, buffer, buffer_length, unknown_ptr);
-
-  auto result = kernel_state->app_manager()->DispatchMessageAsync(
-      app, message, buffer, buffer_length);
-  if (result == X_ERROR_NOT_FOUND) {
-    XELOGE("XMsgStartIORequestEx: app %.8X undefined", app);
-  }
-  if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
-    result = X_ERROR_IO_PENDING;
-  }
-  SHIM_SET_RETURN_32(result);
+dword_result_t XMsgStartIORequestEx(
+    dword_t app, dword_t message, pointer_t<XAM_OVERLAPPED> overlapped_ptr,
+    dword_t buffer_ptr, dword_t buffer_length,
+    pointer_t<XMSGSTARTIOREQUEST_UNKNOWNARG> unknown_ptr) {
+  return xeXMsgStartIORequestEx(app, message, overlapped_ptr, buffer_ptr,
+                                buffer_length, unknown_ptr);
 }
+DECLARE_XAM_EXPORT1(XMsgStartIORequestEx, kNone, kImplemented);
 
-SHIM_CALL XMsgCancelIORequest_shim(PPCContext* ppc_context,
-                                   KernelState* kernel_state) {
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(0);
-  uint32_t wait = SHIM_GET_ARG_32(1);
+dword_result_t XMsgStartIORequest(dword_t app, dword_t message,
+                                  pointer_t<XAM_OVERLAPPED> overlapped_ptr,
+                                  dword_t buffer_ptr, dword_t buffer_length) {
+  return xeXMsgStartIORequestEx(app, message, overlapped_ptr, buffer_ptr,
+                                buffer_length, nullptr);
+}
+DECLARE_XAM_EXPORT1(XMsgStartIORequest, kNone, kImplemented);
 
-  XELOGD("XMsgCancelIORequest(%.8X, %d)", overlapped_ptr, wait);
-
-  X_HANDLE event_handle = XOverlappedGetEvent(SHIM_MEM_ADDR(overlapped_ptr));
+dword_result_t XMsgCancelIORequest(pointer_t<XAM_OVERLAPPED> overlapped_ptr,
+                                   dword_t wait) {
+  X_HANDLE event_handle = XOverlappedGetEvent(overlapped_ptr);
   if (event_handle && wait) {
-    auto ev = kernel_state->object_table()->LookupObject<XEvent>(event_handle);
+    auto ev =
+        kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
     if (ev) {
       ev->Wait(0, 0, true, nullptr);
     }
   }
 
-  SHIM_SET_RETURN_32(0);
+  return 0;
 }
+DECLARE_XAM_EXPORT1(XMsgCancelIORequest, kNone, kImplemented);
+
+dword_result_t XMsgCompleteIORequest(pointer_t<XAM_OVERLAPPED> overlapped_ptr,
+                                     dword_t result, dword_t extended_error,
+                                     dword_t length) {
+  kernel_state()->CompleteOverlappedImmediateEx(overlapped_ptr, result,
+                                                extended_error, length);
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT2(XMsgCompleteIORequest, kNone, kImplemented, kSketchy);
+
+dword_result_t XamGetOverlappedResult(pointer_t<XAM_OVERLAPPED> overlapped_ptr,
+                                      lpdword_t length_ptr, dword_t unknown) {
+  uint32_t result;
+  if (overlapped_ptr->result != X_ERROR_IO_PENDING) {
+    result = overlapped_ptr->result;
+  } else if (!overlapped_ptr->event) {
+    result = X_ERROR_IO_INCOMPLETE;
+  } else {
+    auto ev = kernel_state()->object_table()->LookupObject<XEvent>(
+        overlapped_ptr->event);
+    result = ev->Wait(3, 1, 0, nullptr);
+    if (XSUCCEEDED(result)) {
+      result = overlapped_ptr->result;
+    } else {
+      result = xboxkrnl::xeRtlNtStatusToDosError(result);
+    }
+  }
+  if (XSUCCEEDED(result) && length_ptr) {
+    *length_ptr = overlapped_ptr->length;
+  }
+  return result;
+}
+DECLARE_XAM_EXPORT2(XamGetOverlappedResult, kNone, kImplemented, kSketchy);
 
 void RegisterMsgExports(xe::cpu::ExportResolver* export_resolver,
-                        KernelState* kernel_state) {
-  SHIM_SET_MAPPING("xam.xex", XMsgInProcessCall, state);
-  SHIM_SET_MAPPING("xam.xex", XMsgSystemProcessCall, state);
-  SHIM_SET_MAPPING("xam.xex", XMsgStartIORequest, state);
-  SHIM_SET_MAPPING("xam.xex", XMsgStartIORequestEx, state);
-  SHIM_SET_MAPPING("xam.xex", XMsgCancelIORequest, state);
-}
+                        KernelState* kernel_state) {}
 
 }  // namespace xam
 }  // namespace kernel

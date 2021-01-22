@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -15,7 +15,6 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
-#include "xenia/kernel/util/xex2.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
@@ -50,6 +49,7 @@ enum FormatFlags {
   FF_IsWide = 1 << 9,
   FF_IsSigned = 1 << 10,
   FF_ForceLeadingZero = 1 << 11,
+  FF_InvertWide = 1 << 12,
 };
 
 enum ArgumentSize {
@@ -117,8 +117,8 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
                     const bool wide) {
   int32_t count = 0;
 
-  char work[512];
-  wchar_t wwork[4];
+  char work8[512];
+  char16_t work16[4];
 
   struct {
     const void* buffer;
@@ -175,7 +175,9 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
       case FS_Invalid:
       case FS_Unknown:
       case FS_End:
-      default: { assert_always(); }
+      default: {
+        assert_always();
+      }
 
       case FS_Start: {
         if (c == '%') {
@@ -221,7 +223,6 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
           flags |= FF_AddPrefix;
           continue;
         }
-
         state = FS_Width;
         // fall through, don't need to goto restart
       }
@@ -241,7 +242,6 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
           width += c - '0';
           continue;
         }
-
         state = FS_PrecisionStart;
         // fall through, don't need to goto restart
       }
@@ -253,7 +253,6 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
           precision = 0;
           continue;
         }
-
         state = FS_Size;
         goto restart;
       }
@@ -272,7 +271,6 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
           precision += c - '0';
           continue;
         }
-
         state = FS_Size;
         // fall through
       }
@@ -311,7 +309,6 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
             continue;
           }
         }
-
         // fall through
       }
 
@@ -320,25 +317,35 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
         // wide character
         switch (c) {
           case 'C': {
-            if (!(flags & (FF_IsShort | FF_IsLong | FF_IsWide))) {
-              flags |= FF_IsWide;
-            }
+            flags |= FF_InvertWide;
             // fall through
           }
 
           // character
           case 'c': {
-            bool is_wide = ((flags & (FF_IsLong | FF_IsWide)) != 0) ^ wide;
+            bool is_wide;
+            if (flags & (FF_IsLong | FF_IsWide)) {
+              // "An lc, lC, wc or wC type specifier is synonymous with C in
+              // printf functions and with c in wprintf functions."
+              is_wide = true;
+            } else if (flags & FF_IsShort) {
+              // "An hc or hC type specifier is synonymous with c in printf
+              // functions and with C in wprintf functions."
+              is_wide = false;
+            } else {
+              is_wide = ((flags & FF_InvertWide) != 0) ^ wide;
+            }
+
             auto value = args.get32();
 
             if (!is_wide) {
-              work[0] = (uint8_t)value;
-              text.buffer = &work[0];
+              work8[0] = (uint8_t)value;
+              text.buffer = &work8[0];
               text.length = 1;
               text.is_wide = false;
             } else {
-              wwork[0] = (uint16_t)value;
-              text.buffer = &wwork[0];
+              work16[0] = (uint16_t)value;
+              text.buffer = &work16[0];
               text.length = 1;
               text.is_wide = true;
               text.swap_wide = false;
@@ -371,7 +378,7 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
             }
 
             if (precision >= 0) {
-              precision = std::min(precision, (int32_t)xe::countof(work));
+              precision = std::min(precision, (int32_t)xe::countof(work8));
             } else {
               precision = 1;
             }
@@ -389,7 +396,7 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
               prefix.length = 0;
             }
 
-            char* end = &work[xe::countof(work) - 1];
+            char* end = &work8[xe::countof(work8) - 1];
             char* start = end;
             start[0] = '\0';
 
@@ -464,9 +471,9 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
 
             auto s = format_double(value, precision, c, flags);
             auto length = (int32_t)s.size();
-            assert_true(length < xe::countof(work));
+            assert_true(length < xe::countof(work8));
 
-            auto start = &work[0];
+            auto start = &work8[0];
             auto end = &start[length];
 
             std::memcpy(start, s.c_str(), length);
@@ -513,9 +520,7 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
 
           // wide string
           case 'S': {
-            if (!(flags & (FF_IsShort | FF_IsLong | FF_IsWide))) {
-              flags |= FF_IsWide;
-            }
+            flags |= FF_InvertWide;
             // fall through
           }
 
@@ -531,18 +536,28 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
               text.is_wide = false;
             } else {
               void* str = SHIM_MEM_ADDR(pointer);
-              bool is_wide = ((flags & (FF_IsLong | FF_IsWide)) != 0) ^ wide;
+              bool is_wide;
+              if (flags & (FF_IsLong | FF_IsWide)) {
+                // "An ls, lS, ws or wS type specifier is synonymous with S in
+                // printf functions and with s in wprintf functions."
+                is_wide = true;
+              } else if (flags & FF_IsShort) {
+                // "An hs or hS type specifier is synonymous with s in printf
+                // functions and with S in wprintf functions."
+                is_wide = false;
+              } else {
+                is_wide = ((flags & FF_InvertWide) != 0) ^ wide;
+              }
               int32_t length;
 
               if (!is_wide) {
                 length = 0;
-                for (auto s = (const uint8_t *)str; cap > 0 && *s; ++s, cap--) {
+                for (auto s = (const uint8_t*)str; cap > 0 && *s; ++s, cap--) {
                   length++;
                 }
               } else {
                 length = 0;
-                for (auto s = (const uint16_t *)str; cap > 0 && *s;
-                     ++s, cap--) {
+                for (auto s = (const uint16_t*)str; cap > 0 && *s; ++s, cap--) {
                   length++;
                 }
               }
@@ -557,9 +572,12 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
           // ANSI_STRING / UNICODE_STRING
           case 'Z': {
             assert_always();
+            break;
           }
 
-          default: { assert_always(); }
+          default: {
+            assert_always();
+          }
         }
       }
     }
@@ -619,7 +637,7 @@ int32_t format_core(PPCContext* ppc_context, FormatData& data, ArgList& args,
         }
       }
     } else {
-      // it's a const wchar_t*
+      // it's a const char16_t*
       auto b = (const uint16_t*)text.buffer;
       if (text.swap_wide) {
         while (remaining-- > 0) {
@@ -706,7 +724,7 @@ class StringFormatData : public FormatData {
 
   void skip(int32_t count) {
     while (count-- > 0) {
-      if (!*input_) {
+      if (!get()) {
         break;
       }
     }
@@ -739,26 +757,26 @@ class WideStringFormatData : public FormatData {
     return xe::byte_swap(result);
   }
 
-  uint16_t peek(int32_t offset) { return input_[offset]; }
+  uint16_t peek(int32_t offset) { return xe::byte_swap(input_[offset]); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
-      if (!*input_) {
+      if (!get()) {
         break;
       }
     }
   }
 
   bool put(uint16_t c) {
-    output_ << (wchar_t)c;
+    output_ << (char16_t)c;
     return true;
   }
 
-  std::wstring wstr() const { return output_.str(); }
+  std::u16string wstr() const { return output_.str(); }
 
  private:
   const uint16_t* input_;
-  std::wostringstream output_;
+  std::basic_stringstream<char16_t> output_;
 };
 
 class WideCountFormatData : public FormatData {
@@ -773,11 +791,11 @@ class WideCountFormatData : public FormatData {
     return xe::byte_swap(result);
   }
 
-  uint16_t peek(int32_t offset) { return input_[offset]; }
+  uint16_t peek(int32_t offset) { return xe::byte_swap(input_[offset]); }
 
   void skip(int32_t count) {
     while (count-- > 0) {
-      if (!*input_) {
+      if (!get()) {
         break;
       }
     }
@@ -812,7 +830,7 @@ SHIM_CALL DbgPrint_shim(PPCContext* ppc_context, KernelState* kernel_state) {
     return;
   }
 
-  XELOGD("(DbgPrint) %s", data.str().c_str());
+  XELOGD("(DbgPrint) {}", data.str());
 
   SHIM_SET_RETURN_32(X_STATUS_SUCCESS);
 }
@@ -823,7 +841,7 @@ SHIM_CALL _snprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   int32_t buffer_count = SHIM_GET_ARG_32(1);
   uint32_t format_ptr = SHIM_GET_ARG_32(2);
 
-  XELOGD("_snprintf(%08X, %i, %08X, ...)", buffer_ptr, buffer_count,
+  XELOGD("_snprintf({:08X}, {}, {:08X}, ...)", buffer_ptr, buffer_count,
          format_ptr);
 
   if (buffer_ptr == 0 || buffer_count <= 0 || format_ptr == 0) {
@@ -859,7 +877,7 @@ SHIM_CALL sprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
 
-  XELOGD("sprintf(%08X, %08X, ...)", buffer_ptr, format_ptr);
+  XELOGD("sprintf({:08X}, {:08X}, ...)", buffer_ptr, format_ptr);
 
   if (buffer_ptr == 0 || format_ptr == 0) {
     SHIM_SET_RETURN_32(-1);
@@ -882,12 +900,49 @@ SHIM_CALL sprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   SHIM_SET_RETURN_32(count);
 }
 
+// https://msdn.microsoft.com/en-us/library/2ts7cx93.aspx
+SHIM_CALL _snwprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
+  uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
+  int32_t buffer_count = SHIM_GET_ARG_32(1);
+  uint32_t format_ptr = SHIM_GET_ARG_32(2);
+
+  XELOGD("_snwprintf({:08X}, {}, {:08X}, ...)", buffer_ptr, buffer_count,
+         format_ptr);
+
+  if (buffer_ptr == 0 || buffer_count <= 0 || format_ptr == 0) {
+    SHIM_SET_RETURN_32(-1);
+    return;
+  }
+
+  auto buffer = (uint16_t*)SHIM_MEM_ADDR(buffer_ptr);
+  auto format = (const uint16_t*)SHIM_MEM_ADDR(format_ptr);
+
+  StackArgList args(ppc_context, 3);
+  WideStringFormatData data(format);
+
+  int32_t count = format_core(ppc_context, data, args, true);
+  if (count < 0) {
+    if (buffer_count > 0) {
+      buffer[0] = '\0';  // write a null, just to be safe
+    }
+  } else if (count <= buffer_count) {
+    xe::copy_and_swap(buffer, (uint16_t*)data.wstr().c_str(), count);
+    if (count < buffer_count) {
+      buffer[count] = '\0';
+    }
+  } else {
+    xe::copy_and_swap(buffer, (uint16_t*)data.wstr().c_str(), buffer_count);
+    count = -1;  // for return value
+  }
+  SHIM_SET_RETURN_32(count);
+}
+
 // https://msdn.microsoft.com/en-us/library/ybk95axf.aspx
 SHIM_CALL swprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
 
-  XELOGD("swprintf(%08X, %08X, ...)", buffer_ptr, format_ptr);
+  XELOGD("swprintf({:08X}, {:08X}, ...)", buffer_ptr, format_ptr);
 
   if (buffer_ptr == 0 || format_ptr == 0) {
     SHIM_SET_RETURN_32(-1);
@@ -917,7 +972,7 @@ SHIM_CALL _vsnprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   uint32_t format_ptr = SHIM_GET_ARG_32(2);
   uint32_t arg_ptr = SHIM_GET_ARG_32(3);
 
-  XELOGD("_vsnprintf(%08X, %i, %08X, %08X)", buffer_ptr, buffer_count,
+  XELOGD("_vsnprintf({:08X}, {}, {:08X}, {:08X})", buffer_ptr, buffer_count,
          format_ptr, arg_ptr);
 
   if (buffer_ptr == 0 || buffer_count <= 0 || format_ptr == 0) {
@@ -950,13 +1005,53 @@ SHIM_CALL _vsnprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   SHIM_SET_RETURN_32(count);
 }
 
+// https://msdn.microsoft.com/en-us/library/1kt27hek.aspx
+SHIM_CALL _vsnwprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
+  uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
+  int32_t buffer_count = SHIM_GET_ARG_32(1);
+  uint32_t format_ptr = SHIM_GET_ARG_32(2);
+  uint32_t arg_ptr = SHIM_GET_ARG_32(3);
+
+  XELOGD("_vsnwprintf({:08X}, {}, {:08X}, {:08X})", buffer_ptr, buffer_count,
+         format_ptr, arg_ptr);
+
+  if (buffer_ptr == 0 || buffer_count <= 0 || format_ptr == 0) {
+    SHIM_SET_RETURN_32(-1);
+    return;
+  }
+
+  auto buffer = (uint16_t*)SHIM_MEM_ADDR(buffer_ptr);
+  auto format = (const uint16_t*)SHIM_MEM_ADDR(format_ptr);
+
+  ArrayArgList args(ppc_context, arg_ptr);
+  WideStringFormatData data(format);
+
+  int32_t count = format_core(ppc_context, data, args, true);
+  if (count < 0) {
+    // Error.
+    if (buffer_count > 0) {
+      buffer[0] = '\0';  // write a null, just to be safe
+    }
+  } else if (count <= buffer_count) {
+    // Fit within the buffer.
+    xe::copy_and_swap(buffer, (uint16_t*)data.wstr().c_str(), count);
+    if (count < buffer_count) {
+      buffer[count] = '\0';
+    }
+  } else {
+    // Overflowed buffer. We still return the count we would have written.
+    xe::copy_and_swap(buffer, (uint16_t*)data.wstr().c_str(), buffer_count);
+  }
+  SHIM_SET_RETURN_32(count);
+}
+
 // https://msdn.microsoft.com/en-us/library/28d5ce15.aspx
 SHIM_CALL vsprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
   uint32_t arg_ptr = SHIM_GET_ARG_32(2);
 
-  XELOGD("vsprintf(%08X, %08X, %08X)", buffer_ptr, format_ptr, arg_ptr);
+  XELOGD("vsprintf({:08X}, {:08X}, {:08X})", buffer_ptr, format_ptr, arg_ptr);
 
   if (buffer_ptr == 0 || format_ptr == 0) {
     SHIM_SET_RETURN_32(-1);
@@ -984,7 +1079,7 @@ SHIM_CALL _vscwprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   uint32_t format_ptr = SHIM_GET_ARG_32(0);
   uint32_t arg_ptr = SHIM_GET_ARG_32(1);
 
-  XELOGD("_vscwprintf(%08X, %08X)", format_ptr, arg_ptr);
+  XELOGD("_vscwprintf({:08X}, {:08X})", format_ptr, arg_ptr);
 
   if (format_ptr == 0) {
     SHIM_SET_RETURN_32(-1);
@@ -1007,7 +1102,7 @@ SHIM_CALL vswprintf_shim(PPCContext* ppc_context, KernelState* kernel_state) {
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
   uint32_t arg_ptr = SHIM_GET_ARG_32(2);
 
-  XELOGD("vswprintf(%08X, %08X, %08X)", buffer_ptr, format_ptr, arg_ptr);
+  XELOGD("vswprintf({:08X}, {:08X}, {:08X})", buffer_ptr, format_ptr, arg_ptr);
 
   if (buffer_ptr == 0 || format_ptr == 0) {
     SHIM_SET_RETURN_32(-1);
@@ -1035,11 +1130,13 @@ void RegisterStringExports(xe::cpu::ExportResolver* export_resolver,
   SHIM_SET_MAPPING("xboxkrnl.exe", DbgPrint, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", _snprintf, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", sprintf, state);
+  SHIM_SET_MAPPING("xboxkrnl.exe", _snwprintf, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", swprintf, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", _vsnprintf, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", vsprintf, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", _vscwprintf, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", vswprintf, state);
+  SHIM_SET_MAPPING("xboxkrnl.exe", _vsnwprintf, state);
 }
 
 }  // namespace xboxkrnl

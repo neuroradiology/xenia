@@ -5,10 +5,10 @@ project("xenia-base")
   uuid("aeadaf22-2b20-4941-b05f-a802d5679c11")
   kind("StaticLib")
   language("C++")
-  defines({
+  links({
+    "fmt",
   })
-  includedirs({
-    project_root.."/third_party/gflags/src",
+  defines({
   })
   local_platform_files()
   removefiles({"main_*.cc"})
@@ -16,11 +16,4 @@ project("xenia-base")
     "debug_visualizers.natvis",
   })
 
-test_suite("xenia-base-tests", project_root, ".", {
-  includedirs = {
-    project_root.."/third_party/gflags/src",
-  },
-  links = {
-    "xenia-base",
-  },
-})
+include("testing")

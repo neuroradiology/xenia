@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -31,7 +31,7 @@ constexpr double kDoubleClickDistance = 5;
 
 constexpr int32_t kMouseWheelDetent = 120;
 
-Window::Window(Loop* loop, const std::wstring& title)
+Window::Window(Loop* loop, const std::string& title)
     : loop_(loop), title_(title) {}
 
 Window::~Window() {
@@ -154,6 +154,10 @@ void Window::Layout() {
 
 void Window::Invalidate() {}
 
+void Window::OnDpiChanged(UIEvent* e) {
+  // TODO(DrChat): Notify listeners.
+}
+
 void Window::OnResize(UIEvent* e) {
   ForEachListener([e](auto listener) { listener->OnResize(e); });
 }
@@ -169,12 +173,15 @@ void Window::OnPaint(UIEvent* e) {
 
   ++frame_count_;
   ++fps_frame_count_;
-  uint64_t now_ns = xe::Clock::QueryHostSystemTime();
-  if (now_ns > fps_update_time_ns_ + 1000 * 10000) {
+  static auto tick_frequency = Clock::QueryHostTickFrequency();
+  auto now_ticks = Clock::QueryHostTickCount();
+  // Average fps over 1 second.
+  if (now_ticks > fps_update_time_ticks_ + tick_frequency * 1) {
     fps_ = static_cast<uint32_t>(
         fps_frame_count_ /
-        (static_cast<double>(now_ns - fps_update_time_ns_) / 10000000.0));
-    fps_update_time_ns_ = now_ns;
+        (static_cast<double>(now_ticks - fps_update_time_ticks_) /
+         tick_frequency));
+    fps_update_time_ticks_ = now_ticks;
     fps_frame_count_ = 0;
   }
 
@@ -182,18 +189,29 @@ void Window::OnPaint(UIEvent* e) {
 
   // Prepare ImGui for use this frame.
   auto& io = imgui_drawer_->GetIO();
-  if (!last_paint_time_ns_) {
+  if (!last_paint_time_ticks_) {
     io.DeltaTime = 0.0f;
-    last_paint_time_ns_ = now_ns;
+    last_paint_time_ticks_ = now_ticks;
   } else {
-    io.DeltaTime = (now_ns - last_paint_time_ns_) / 10000000.0f;
-    last_paint_time_ns_ = now_ns;
+    io.DeltaTime = (now_ticks - last_paint_time_ticks_) /
+                   static_cast<float>(tick_frequency);
+    last_paint_time_ticks_ = now_ticks;
   }
-  io.DisplaySize =
-      ImVec2(static_cast<float>(width()), static_cast<float>(height()));
+  io.DisplaySize = ImVec2(static_cast<float>(scaled_width()),
+                          static_cast<float>(scaled_height()));
+
+  bool can_swap = context_->BeginSwap();
+  if (context_->WasLost()) {
+    on_context_lost(e);
+    return;
+  }
+  if (!can_swap) {
+    // Surface not available.
+    return;
+  }
+
   ImGui::NewFrame();
 
-  context_->BeginSwap();
   ForEachListener([e](auto listener) { listener->OnPainting(e); });
   on_painting(e);
   ForEachListener([e](auto listener) { listener->OnPaint(e); });
@@ -201,6 +219,7 @@ void Window::OnPaint(UIEvent* e) {
 
   // Flush ImGui buffers before we swap.
   ImGui::Render();
+  imgui_drawer_->RenderDrawLists();
 
   ForEachListener([e](auto listener) { listener->OnPainted(e); });
   on_painted(e);
@@ -211,6 +230,11 @@ void Window::OnPaint(UIEvent* e) {
   if (kContinuousRepaint) {
     Invalidate();
   }
+}
+
+void Window::OnFileDrop(FileDropEvent* e) {
+  on_file_drop(e);
+  ForEachListener([e](auto listener) { listener->OnFileDrop(e); });
 }
 
 void Window::OnVisible(UIEvent* e) {

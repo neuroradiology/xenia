@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2019 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,35 +10,44 @@
 #ifndef XENIA_BASE_MATH_H_
 #define XENIA_BASE_MATH_H_
 
-#include <xmmintrin.h>
-
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <numeric>
 #include <type_traits>
-
 #include "xenia/base/platform.h"
+
+#if XE_ARCH_AMD64
+#include <xmmintrin.h>
+#endif
 
 namespace xe {
 
 template <typename T, size_t N>
-size_t countof(T (&arr)[N]) {
+constexpr size_t countof(T (&arr)[N]) {
   return std::extent<T[N]>::value;
+}
+
+template <typename T>
+constexpr bool is_pow2(T value) {
+  return (value & (value - 1)) == 0;
 }
 
 // Rounds up the given value to the given alignment.
 template <typename T>
-T align(T value, T alignment) {
+constexpr T align(T value, T alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
 // Rounds the given number up to the next highest multiple.
 template <typename T, typename V>
-T round_up(T value, V multiple) {
+constexpr T round_up(T value, V multiple) {
   return value ? (((value + multiple - 1) / multiple) * multiple) : multiple;
 }
 
-inline float saturate(float value) {
+constexpr float saturate(float value) {
   return std::max(std::min(1.0f, value), -1.0f);
 }
 
@@ -56,12 +65,56 @@ T next_pow2(T value) {
   return value;
 }
 
+#if __cpp_lib_gcd_lcm
+template <typename T>
+constexpr T greatest_common_divisor(T a, T b) {
+  return std::gcd(a, b);
+}
+#else
+template <typename T>
+constexpr T greatest_common_divisor(T a, T b) {
+  // Use the Euclid algorithm to calculate the greatest common divisor
+  while (b) {
+    a = std::exchange(b, a % b);
+  }
+  return a;
+}
+#endif
+
+template <typename T>
+constexpr void reduce_fraction(T& numerator, T& denominator) {
+  auto gcd = greatest_common_divisor(numerator, denominator);
+  numerator /= gcd;
+  denominator /= gcd;
+}
+
+template <typename T>
+constexpr void reduce_fraction(std::pair<T, T>& fraction) {
+  reduce_fraction<T>(fraction.first, fraction.second);
+}
+
 constexpr uint32_t make_bitmask(uint32_t a, uint32_t b) {
   return (static_cast<uint32_t>(-1) >> (31 - b)) & ~((1u << a) - 1);
 }
 
 constexpr uint32_t select_bits(uint32_t value, uint32_t a, uint32_t b) {
   return (value & make_bitmask(a, b)) >> a;
+}
+
+inline uint32_t bit_count(uint32_t v) {
+  v = v - ((v >> 1) & 0x55555555);
+  v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+  return ((v + (v >> 4) & 0xF0F0F0F) * 0x1010101) >> 24;
+}
+
+inline uint32_t bit_count(uint64_t v) {
+  v = (v & 0x5555555555555555LU) + (v >> 1 & 0x5555555555555555LU);
+  v = (v & 0x3333333333333333LU) + (v >> 2 & 0x3333333333333333LU);
+  v = v + (v >> 4) & 0x0F0F0F0F0F0F0F0FLU;
+  v = v + (v >> 8);
+  v = v + (v >> 16);
+  v = v + (v >> 32) & 0x0000007F;
+  return static_cast<uint32_t>(v);
 }
 
 // lzcnt instruction, typed for integers of all sizes.
@@ -104,24 +157,70 @@ inline uint8_t lzcnt(uint64_t v) {
   return static_cast<uint8_t>(is_nonzero ? int8_t(index) ^ 0x3F : 64);
 }
 #endif  // LZCNT supported
-#else
+
+inline uint8_t tzcnt(uint8_t v) {
+  unsigned long index;
+  unsigned long mask = v;
+  unsigned char is_nonzero = _BitScanForward(&index, mask);
+  return static_cast<uint8_t>(is_nonzero ? int8_t(index) : 8);
+}
+
+inline uint8_t tzcnt(uint16_t v) {
+  unsigned long index;
+  unsigned long mask = v;
+  unsigned char is_nonzero = _BitScanForward(&index, mask);
+  return static_cast<uint8_t>(is_nonzero ? int8_t(index) : 16);
+}
+
+inline uint8_t tzcnt(uint32_t v) {
+  unsigned long index;
+  unsigned long mask = v;
+  unsigned char is_nonzero = _BitScanForward(&index, mask);
+  return static_cast<uint8_t>(is_nonzero ? int8_t(index) : 32);
+}
+
+inline uint8_t tzcnt(uint64_t v) {
+  unsigned long index;
+  unsigned long long mask = v;
+  unsigned char is_nonzero = _BitScanForward64(&index, mask);
+  return static_cast<uint8_t>(is_nonzero ? int8_t(index) : 64);
+}
+
+#else  // XE_PLATFORM_WIN32
 inline uint8_t lzcnt(uint8_t v) {
-  return static_cast<uint8_t>(__builtin_clzs(v) - 8);
+  return v == 0 ? 8 : static_cast<uint8_t>(__builtin_clz(v) - 24);
 }
 inline uint8_t lzcnt(uint16_t v) {
-  return static_cast<uint8_t>(__builtin_clzs(v));
+  return v == 0 ? 16 : static_cast<uint8_t>(__builtin_clz(v) - 16);
 }
 inline uint8_t lzcnt(uint32_t v) {
-  return static_cast<uint8_t>(__builtin_clz(v));
+  return v == 0 ? 32 : static_cast<uint8_t>(__builtin_clz(v));
 }
 inline uint8_t lzcnt(uint64_t v) {
-  return static_cast<uint8_t>(__builtin_clzll(v));
+  return v == 0 ? 64 : static_cast<uint8_t>(__builtin_clzll(v));
 }
-#endif  // XE_PLATFORM_WIN32
+
+inline uint8_t tzcnt(uint8_t v) {
+  return v == 0 ? 8 : static_cast<uint8_t>(__builtin_ctz(v));
+}
+inline uint8_t tzcnt(uint16_t v) {
+  return v == 0 ? 16 : static_cast<uint8_t>(__builtin_ctz(v));
+}
+inline uint8_t tzcnt(uint32_t v) {
+  return v == 0 ? 32 : static_cast<uint8_t>(__builtin_ctz(v));
+}
+inline uint8_t tzcnt(uint64_t v) {
+  return v == 0 ? 64 : static_cast<uint8_t>(__builtin_ctzll(v));
+}
+#endif
 inline uint8_t lzcnt(int8_t v) { return lzcnt(static_cast<uint8_t>(v)); }
 inline uint8_t lzcnt(int16_t v) { return lzcnt(static_cast<uint16_t>(v)); }
 inline uint8_t lzcnt(int32_t v) { return lzcnt(static_cast<uint32_t>(v)); }
 inline uint8_t lzcnt(int64_t v) { return lzcnt(static_cast<uint64_t>(v)); }
+inline uint8_t tzcnt(int8_t v) { return tzcnt(static_cast<uint8_t>(v)); }
+inline uint8_t tzcnt(int16_t v) { return tzcnt(static_cast<uint16_t>(v)); }
+inline uint8_t tzcnt(int32_t v) { return tzcnt(static_cast<uint32_t>(v)); }
+inline uint8_t tzcnt(int64_t v) { return tzcnt(static_cast<uint64_t>(v)); }
 
 // BitScanForward (bsf).
 // Search the value from least significant bit (LSB) to the most significant bit
@@ -139,12 +238,12 @@ inline bool bit_scan_forward(uint64_t v, uint32_t* out_first_set_index) {
 #else
 inline bool bit_scan_forward(uint32_t v, uint32_t* out_first_set_index) {
   int i = ffs(v);
-  *out_first_set_index = i;
+  *out_first_set_index = i - 1;
   return i != 0;
 }
 inline bool bit_scan_forward(uint64_t v, uint32_t* out_first_set_index) {
   int i = ffsll(v);
-  *out_first_set_index = i;
+  *out_first_set_index = i - 1;
   return i != 0;
 }
 #endif  // XE_PLATFORM_WIN32
@@ -193,6 +292,7 @@ T clamp(T value, T min_value, T max_value) {
   return t > max_value ? max_value : t;
 }
 
+#if XE_ARCH_AMD64
 // Utilities for SSE values.
 template <int N>
 float m128_f32(const __m128& v) {
@@ -232,9 +332,44 @@ template <int N>
 int64_t m128_i64(const __m128& v) {
   return m128_i64<N>(_mm_castps_pd(v));
 }
+#endif
 
 uint16_t float_to_half(float value);
 float half_to_float(uint16_t value);
+
+// https://locklessinc.com/articles/sat_arithmetic/
+template <typename T>
+inline T sat_add(T a, T b) {
+  using TU = typename std::make_unsigned<T>::type;
+  TU result = TU(a) + TU(b);
+  if (std::is_unsigned<T>::value) {
+    result |=
+        TU(-static_cast<typename std::make_signed<T>::type>(result < TU(a)));
+  } else {
+    TU overflowed =
+        (TU(a) >> (sizeof(T) * 8 - 1)) + std::numeric_limits<T>::max();
+    if (T((overflowed ^ TU(b)) | ~(TU(b) ^ result)) >= 0) {
+      result = overflowed;
+    }
+  }
+  return T(result);
+}
+template <typename T>
+inline T sat_sub(T a, T b) {
+  using TU = typename std::make_unsigned<T>::type;
+  TU result = TU(a) - TU(b);
+  if (std::is_unsigned<T>::value) {
+    result &=
+        TU(-static_cast<typename std::make_signed<T>::type>(result <= TU(a)));
+  } else {
+    TU overflowed =
+        (TU(a) >> (sizeof(T) * 8 - 1)) + std::numeric_limits<T>::max();
+    if (T((overflowed ^ TU(b)) & (overflowed ^ result)) < 0) {
+      result = overflowed;
+    }
+  }
+  return T(result);
+}
 
 }  // namespace xe
 

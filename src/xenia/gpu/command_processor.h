@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -47,6 +47,8 @@ struct SwapState {
   uintptr_t front_buffer_texture = 0;
   // Current back buffer, being updated by the CP.
   uintptr_t back_buffer_texture = 0;
+  // Backend data
+  void* backend_data = nullptr;
   // Whether the back buffer is dirty and a swap is pending.
   bool pending = false;
 };
@@ -54,6 +56,50 @@ struct SwapState {
 enum class SwapMode {
   kNormal,
   kIgnored,
+};
+
+enum class GammaRampType {
+  kUnknown = 0,
+  kNormal,
+  kPWL,
+};
+
+struct GammaRamp {
+  struct NormalEntry {
+    union {
+      struct {
+        uint32_t b : 10;
+        uint32_t g : 10;
+        uint32_t r : 10;
+        uint32_t : 2;
+      };
+      uint32_t value;
+    };
+  };
+
+  struct PWLValue {
+    union {
+      struct {
+        uint16_t base;
+        uint16_t delta;
+      };
+      uint32_t value;
+    };
+  };
+
+  struct PWLEntry {
+    union {
+      struct {
+        PWLValue r;
+        PWLValue g;
+        PWLValue b;
+      };
+      PWLValue values[3];
+    };
+  };
+
+  NormalEntry normal[256];
+  PWLEntry pwl[128];
 };
 
 class CommandProcessor {
@@ -84,9 +130,19 @@ class CommandProcessor {
     swap_request_handler_ = fn;
   }
 
-  void RequestFrameTrace(const std::wstring& root_path);
-  void BeginTracing(const std::wstring& root_path);
-  void EndTracing();
+  // May be called not only from the command processor thread when the command
+  // processor is paused, and the termination of this function may be explicitly
+  // awaited.
+  virtual void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                                       uint32_t title_id, bool blocking);
+
+  virtual void RequestFrameTrace(const std::filesystem::path& root_path);
+  virtual void BeginTracing(const std::filesystem::path& root_path);
+  virtual void EndTracing();
+
+  virtual void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) = 0;
+
+  virtual void RestoreEdramSnapshot(const void* snapshot) = 0;
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t page_count);
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size);
@@ -104,8 +160,8 @@ class CommandProcessor {
 
  protected:
   struct IndexBufferInfo {
-    IndexFormat format = IndexFormat::kInt16;
-    Endian endianness = Endian::kUnspecified;
+    xenos::IndexFormat format = xenos::IndexFormat::kInt16;
+    xenos::Endian endianness = xenos::Endian::kNone;
     uint32_t count = 0;
     uint32_t guest_base = 0;
     size_t length = 0;
@@ -115,7 +171,9 @@ class CommandProcessor {
   virtual bool SetupContext() = 0;
   virtual void ShutdownContext() = 0;
 
-  void WriteRegister(uint32_t index, uint32_t value);
+  virtual void WriteRegister(uint32_t index, uint32_t value);
+
+  void UpdateGammaRampValue(GammaRampType type, uint32_t value);
 
   virtual void MakeCoherent();
   virtual void PrepareForWait();
@@ -125,6 +183,7 @@ class CommandProcessor {
                            uint32_t frontbuffer_height) = 0;
 
   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
+  virtual void OnPrimaryBufferEnd() {}
   void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
   bool ExecutePacket(RingBuffer* reader);
   bool ExecutePacketType0(RingBuffer* reader, uint32_t packet);
@@ -181,13 +240,17 @@ class CommandProcessor {
   bool ExecutePacketType3_VIZ_QUERY(RingBuffer* reader, uint32_t packet,
                                     uint32_t count);
 
-  virtual Shader* LoadShader(ShaderType shader_type, uint32_t guest_address,
+  virtual Shader* LoadShader(xenos::ShaderType shader_type,
+                             uint32_t guest_address,
                              const uint32_t* host_address,
                              uint32_t dword_count) = 0;
 
-  virtual bool IssueDraw(PrimitiveType prim_type, uint32_t index_count,
-                         IndexBufferInfo* index_buffer_info) = 0;
+  virtual bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                         IndexBufferInfo* index_buffer_info,
+                         bool major_mode_explicit) = 0;
   virtual bool IssueCopy() = 0;
+
+  virtual void InitializeTrace() = 0;
 
   Memory* memory_ = nullptr;
   kernel::KernelState* kernel_state_ = nullptr;
@@ -201,8 +264,8 @@ class CommandProcessor {
     kSingleFrame,
   };
   TraceState trace_state_ = TraceState::kDisabled;
-  std::wstring trace_stream_path_;
-  std::wstring trace_frame_path_;
+  std::filesystem::path trace_stream_path_;
+  std::filesystem::path trace_frame_path_;
 
   std::atomic<bool> worker_running_;
   kernel::object_ref<kernel::XHostThread> worker_thread_;
@@ -212,6 +275,9 @@ class CommandProcessor {
   SwapState swap_state_;
   std::function<void()> swap_request_handler_;
   std::queue<std::function<void()>> pending_fns_;
+
+  // MicroEngine binary from PM4_ME_INIT
+  std::vector<uint32_t> me_bin_;
 
   uint32_t counter_ = 0;
 
@@ -232,6 +298,11 @@ class CommandProcessor {
   Shader* active_pixel_shader_ = nullptr;
 
   bool paused_ = false;
+
+  GammaRamp gamma_ramp_ = {};
+  int gamma_ramp_rw_subindex_ = 0;
+  bool dirty_gamma_ramp_normal_ = true;
+  bool dirty_gamma_ramp_pwl_ = true;
 };
 
 }  // namespace gpu

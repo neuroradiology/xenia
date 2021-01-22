@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -11,6 +11,8 @@
 #define XENIA_CPU_BACKEND_X64_X64_CODE_CACHE_H_
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -25,6 +27,18 @@ namespace cpu {
 namespace backend {
 namespace x64 {
 
+struct EmitFunctionInfo {
+  struct _code_size {
+    size_t prolog;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+    size_t total;
+  } code_size;
+  size_t prolog_stack_alloc_offset;  // offset of instruction after stack alloc
+  size_t stack_size;
+};
+
 class X64CodeCache : public CodeCache {
  public:
   ~X64CodeCache() override;
@@ -33,9 +47,11 @@ class X64CodeCache : public CodeCache {
 
   virtual bool Initialize();
 
-  std::wstring file_name() const override { return file_name_; }
-  uint32_t base_address() const override { return kGeneratedCodeBase; }
-  uint32_t total_size() const override { return kGeneratedCodeSize; }
+  const std::filesystem::path& file_name() const override { return file_name_; }
+  uintptr_t execute_base_address() const override {
+    return kGeneratedCodeExecuteBase;
+  }
+  size_t total_size() const override { return kGeneratedCodeSize; }
 
   // TODO(benvanik): ELF serialization/etc
   // TODO(benvanik): keep track of code blocks
@@ -47,11 +63,15 @@ class X64CodeCache : public CodeCache {
 
   void CommitExecutableRange(uint32_t guest_low, uint32_t guest_high);
 
-  void* PlaceHostCode(uint32_t guest_address, void* machine_code,
-                      size_t code_size, size_t stack_size);
-  void* PlaceGuestCode(uint32_t guest_address, void* machine_code,
-                       size_t code_size, size_t stack_size,
-                       GuestFunction* function_info);
+  void PlaceHostCode(uint32_t guest_address, void* machine_code,
+                     const EmitFunctionInfo& func_info,
+                     void*& code_execute_address_out,
+                     void*& code_write_address_out);
+  void PlaceGuestCode(uint32_t guest_address, void* machine_code,
+                      const EmitFunctionInfo& func_info,
+                      GuestFunction* function_info,
+                      void*& code_execute_address_out,
+                      void*& code_write_address_out);
   uint32_t PlaceData(const void* data, size_t length);
 
   GuestFunction* LookupFunction(uint64_t host_pc) override;
@@ -59,18 +79,21 @@ class X64CodeCache : public CodeCache {
  protected:
   // All executable code falls within 0x80000000 to 0x9FFFFFFF, so we can
   // only map enough for lookups within that range.
-  static const uint64_t kIndirectionTableBase = 0x80000000;
-  static const uint64_t kIndirectionTableSize = 0x1FFFFFFF;
+  static const size_t kIndirectionTableSize = 0x1FFFFFFF;
+  static const uintptr_t kIndirectionTableBase = 0x80000000;
   // The code range is 512MB, but we know the total code games will have is
   // pretty small (dozens of mb at most) and our expansion is reasonablish
   // so 256MB should be more than enough.
-  static const uint64_t kGeneratedCodeBase = 0xA0000000;
-  static const uint64_t kGeneratedCodeSize = 0x0FFFFFFF;
+  static const size_t kGeneratedCodeSize = 0x0FFFFFFF;
+  static const uintptr_t kGeneratedCodeExecuteBase = 0xA0000000;
+  // Used for writing when PageAccess::kExecuteReadWrite is not supported.
+  static const uintptr_t kGeneratedCodeWriteBase =
+      kGeneratedCodeExecuteBase + kGeneratedCodeSize + 1;
 
   // This is picked to be high enough to cover whatever we can reasonably
   // expect. If we hit issues with this it probably means some corner case
   // in analysis triggering.
-  static const size_t kMaximumFunctionCount = 50000;
+  static const size_t kMaximumFunctionCount = 100000;
 
   struct UnwindReservation {
     size_t data_size = 0;
@@ -84,12 +107,13 @@ class X64CodeCache : public CodeCache {
     return UnwindReservation();
   }
   virtual void PlaceCode(uint32_t guest_address, void* machine_code,
-                         size_t code_size, size_t stack_size,
-                         void* code_address,
+                         const EmitFunctionInfo& func_info,
+                         void* code_execute_address,
                          UnwindReservation unwind_reservation) {}
 
-  std::wstring file_name_;
-  xe::memory::FileMappingHandle mapping_ = nullptr;
+  std::filesystem::path file_name_;
+  xe::memory::FileMappingHandle mapping_ =
+      xe::memory::kFileMappingHandleInvalid;
 
   // NOTE: the global critical region must be held when manipulating the offsets
   // or counts of anything, to keep the tables consistent and ordered.
@@ -102,9 +126,13 @@ class X64CodeCache : public CodeCache {
   // the generated code table that correspond to the PPC functions in guest
   // space.
   uint8_t* indirection_table_base_ = nullptr;
-  // Fixed at kGeneratedCodeBase and holding all generated code, growing as
-  // needed.
-  uint8_t* generated_code_base_ = nullptr;
+  // Fixed at kGeneratedCodeExecuteBase and holding all generated code, growing
+  // as needed.
+  uint8_t* generated_code_execute_base_ = nullptr;
+  // View of the memory that backs generated_code_execute_base_ when
+  // PageAccess::kExecuteReadWrite is not supported, for writing the generated
+  // code. Equals to generated_code_execute_base_ when it's supported.
+  uint8_t* generated_code_write_base_ = nullptr;
   // Current offset to empty space in generated code.
   size_t generated_code_offset_ = 0;
   // Current high water mark of COMMITTED code.

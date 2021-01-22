@@ -24,16 +24,16 @@ dword_result_t XamAvatarInitialize(
     lpdword_t function_ptrs,   // 20b, 5 pointers
     lpunknown_t unk5,          // ptr in data segment
     dword_t unk6               // flags - 0x00300000, 0x30, etc
-    ) {
+) {
   // Negative to fail. Game should immediately call XamAvatarShutdown.
   return ~0u;
 }
-DECLARE_XAM_EXPORT(XamAvatarInitialize, ExportTag::kStub);
+DECLARE_XAM_EXPORT1(XamAvatarInitialize, kAvatars, kStub);
 
 void XamAvatarShutdown() {
   // No-op.
 }
-DECLARE_XAM_EXPORT(XamAvatarShutdown, ExportTag::kStub);
+DECLARE_XAM_EXPORT1(XamAvatarShutdown, kAvatars, kStub);
 
 void RegisterAvatarExports(xe::cpu::ExportResolver* export_resolver,
                            KernelState* kernel_state) {}

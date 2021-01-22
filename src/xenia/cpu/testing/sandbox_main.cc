@@ -14,14 +14,12 @@
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/raw_module.h"
 
-#include <gflags/gflags.h>
-
 namespace xe {
 namespace cpu {
 namespace sandbox {
 
-using xe::cpu::ppc::PPCContext;
 using xe::cpu::Runtime;
+using xe::cpu::ppc::PPCContext;
 
 // TODO(benvanik): simple memory? move more into core?
 

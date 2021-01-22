@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -11,7 +11,6 @@
 
 #include "third_party/imgui/imgui.h"
 #include "xenia/base/assert.h"
-#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/ui/window.h"
 
@@ -26,53 +25,44 @@ const char kProggyTinyCompressedDataBase85[10950 + 1] =
 static_assert(sizeof(ImmediateVertex) == sizeof(ImDrawVert),
               "Vertex types must match");
 
-ImGuiDrawer* ImGuiDrawer::current_drawer_ = nullptr;
-
 ImGuiDrawer::ImGuiDrawer(xe::ui::Window* window)
     : window_(window), graphics_context_(window->context()) {
   Initialize();
 }
 
 ImGuiDrawer::~ImGuiDrawer() {
-  auto previous_state = ImGui::GetInternalState();
-  ImGui::SetInternalState(internal_state_.data());
-  ImGui::Shutdown();
-  if (previous_state != internal_state_.data()) {
-    ImGui::SetInternalState(previous_state);
+  if (internal_state_) {
+    ImGui::DestroyContext(internal_state_);
+    internal_state_ = nullptr;
   }
-
-  current_drawer_ = nullptr;
 }
 
 void ImGuiDrawer::Initialize() {
   // Setup ImGui internal state.
   // This will give us state we can swap to the ImGui globals when in use.
-  internal_state_.resize(ImGui::GetInternalStateSize());
-  ImGui::SetInternalState(internal_state_.data(), true);
-  current_drawer_ = this;
+  internal_state_ = ImGui::CreateContext();
+  ImGui::SetCurrentContext(internal_state_);
 
   auto& io = ImGui::GetIO();
 
-  font_atlas_ = std::make_unique<ImFontAtlas>();
-  io.Fonts = font_atlas_.get();
+  // TODO(gibbed): disable imgui.ini saving for now,
+  // imgui assumes paths are char* so we can't throw a good path at it on
+  // Windows.
+  io.IniFilename = nullptr;
 
   SetupFont();
 
   io.DeltaTime = 1.0f / 60.0f;
-  io.RenderDrawListsFn = [](ImDrawData* data) {
-    assert_not_null(current_drawer_);
-    current_drawer_->RenderDrawLists(data);
-  };
 
   auto& style = ImGui::GetStyle();
   style.ScrollbarRounding = 0;
-  style.WindowFillAlphaDefault = 1.0f;
   style.WindowRounding = 0;
+  style.TabRounding = 0;
   style.Colors[ImGuiCol_Text] = ImVec4(0.89f, 0.90f, 0.90f, 1.00f);
   style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
   style.Colors[ImGuiCol_WindowBg] = ImVec4(0.00f, 0.06f, 0.00f, 1.00f);
-  style.Colors[ImGuiCol_ChildWindowBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-  style.Colors[ImGuiCol_Border] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+  style.Colors[ImGuiCol_ChildBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+  style.Colors[ImGuiCol_Border] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
   style.Colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
   style.Colors[ImGuiCol_FrameBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.30f);
   style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.90f, 0.80f, 0.80f, 0.40f);
@@ -87,7 +77,7 @@ void ImGuiDrawer::Initialize() {
       ImVec4(0.00f, 1.00f, 0.15f, 0.62f);
   style.Colors[ImGuiCol_ScrollbarGrabActive] =
       ImVec4(0.00f, 0.91f, 0.09f, 0.40f);
-  style.Colors[ImGuiCol_ComboBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.99f);
+  style.Colors[ImGuiCol_PopupBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.99f);
   style.Colors[ImGuiCol_CheckMark] = ImVec4(0.74f, 0.90f, 0.72f, 0.50f);
   style.Colors[ImGuiCol_SliderGrab] = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
   style.Colors[ImGuiCol_SliderGrabActive] = ImVec4(0.34f, 0.75f, 0.11f, 1.00f);
@@ -97,25 +87,25 @@ void ImGuiDrawer::Initialize() {
   style.Colors[ImGuiCol_Header] = ImVec4(0.00f, 0.40f, 0.00f, 0.71f);
   style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.00f, 0.60f, 0.26f, 0.80f);
   style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.00f, 0.75f, 0.00f, 0.80f);
-  style.Colors[ImGuiCol_Column] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-  style.Colors[ImGuiCol_ColumnHovered] = ImVec4(0.36f, 0.89f, 0.38f, 1.00f);
-  style.Colors[ImGuiCol_ColumnActive] = ImVec4(0.13f, 0.50f, 0.11f, 1.00f);
+  style.Colors[ImGuiCol_Separator] = ImVec4(0.00f, 0.35f, 0.00f, 1.00f);
+  style.Colors[ImGuiCol_SeparatorHovered] = ImVec4(0.36f, 0.89f, 0.38f, 1.00f);
+  style.Colors[ImGuiCol_SeparatorActive] = ImVec4(0.13f, 0.50f, 0.11f, 1.00f);
   style.Colors[ImGuiCol_ResizeGrip] = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
   style.Colors[ImGuiCol_ResizeGripHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.60f);
   style.Colors[ImGuiCol_ResizeGripActive] = ImVec4(1.00f, 1.00f, 1.00f, 0.90f);
-  style.Colors[ImGuiCol_CloseButton] = ImVec4(0.00f, 0.72f, 0.00f, 0.96f);
-  style.Colors[ImGuiCol_CloseButtonHovered] =
-      ImVec4(0.38f, 1.00f, 0.42f, 0.60f);
-  style.Colors[ImGuiCol_CloseButtonActive] = ImVec4(0.56f, 1.00f, 0.64f, 1.00f);
+  style.Colors[ImGuiCol_Tab] = style.Colors[ImGuiCol_Button];
+  style.Colors[ImGuiCol_TabHovered] = style.Colors[ImGuiCol_ButtonHovered];
+  style.Colors[ImGuiCol_TabActive] = style.Colors[ImGuiCol_ButtonActive];
+  style.Colors[ImGuiCol_TabUnfocused] = style.Colors[ImGuiCol_FrameBg];
+  style.Colors[ImGuiCol_TabUnfocusedActive] =
+      style.Colors[ImGuiCol_FrameBgHovered];
   style.Colors[ImGuiCol_PlotLines] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
   style.Colors[ImGuiCol_PlotLinesHovered] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
   style.Colors[ImGuiCol_PlotHistogram] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
   style.Colors[ImGuiCol_PlotHistogramHovered] =
       ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
   style.Colors[ImGuiCol_TextSelectedBg] = ImVec4(0.00f, 1.00f, 0.00f, 0.21f);
-  style.Colors[ImGuiCol_TooltipBg] = ImVec4(0.05f, 0.05f, 0.10f, 0.90f);
-  style.Colors[ImGuiCol_ModalWindowDarkening] =
-      ImVec4(0.20f, 0.20f, 0.20f, 0.35f);
+  style.Colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.20f, 0.20f, 0.20f, 0.35f);
 
   io.KeyMap[ImGuiKey_Tab] = 0x09;  // VK_TAB;
   io.KeyMap[ImGuiKey_LeftArrow] = 0x25;
@@ -143,7 +133,8 @@ void ImGuiDrawer::SetupFont() {
   font_config.OversampleH = font_config.OversampleV = 1;
   font_config.PixelSnapH = true;
   static const ImWchar font_glyph_ranges[] = {
-      0x0020, 0x00FF,  // Basic Latin + Latin Supplement
+      0x0020,
+      0x00FF,  // Basic Latin + Latin Supplement
       0,
   };
   io.Fonts->AddFontFromMemoryCompressedBase85TTF(
@@ -152,7 +143,7 @@ void ImGuiDrawer::SetupFont() {
   // TODO(benvanik): jp font on other platforms?
   // https://github.com/Koruri/kibitaki looks really good, but is 1.5MiB.
   const char* jp_font_path = "C:\\Windows\\Fonts\\msgothic.ttc";
-  if (xe::filesystem::PathExists(xe::to_wstring(jp_font_path))) {
+  if (std::filesystem::exists(jp_font_path)) {
     ImFontConfig jp_font_config;
     jp_font_config.MergeMode = true;
     jp_font_config.OversampleH = jp_font_config.OversampleV = 1;
@@ -172,7 +163,7 @@ void ImGuiDrawer::SetupFont() {
       width, height, ImmediateTextureFilter::kLinear, true,
       reinterpret_cast<uint8_t*>(pixels));
 
-  io.Fonts->TexID = reinterpret_cast<void*>(font_texture_->handle);
+  io.Fonts->TexID = reinterpret_cast<ImTextureID>(font_texture_.get());
 }
 
 void ImGuiDrawer::RenderDrawLists(ImDrawData* data) {
@@ -207,11 +198,7 @@ void ImGuiDrawer::RenderDrawLists(ImDrawData* data) {
       draw.primitive_type = ImmediatePrimitiveType::kTriangles;
       draw.count = cmd.ElemCount;
       draw.index_offset = index_offset;
-      draw.texture_handle =
-          reinterpret_cast<uintptr_t>(cmd.TextureId) & 0xFFFFFFFF;
-      draw.alpha_blend =
-          reinterpret_cast<uintptr_t>(cmd.TextureId) & kIgnoreAlpha ? false
-                                                                    : true;
+      draw.texture = reinterpret_cast<ImmediateTexture*>(cmd.TextureId);
       draw.scissor = true;
       draw.scissor_rect[0] = static_cast<int>(cmd.ClipRect.x);
       draw.scissor_rect[1] = static_cast<int>(height - cmd.ClipRect.w);
@@ -229,9 +216,16 @@ void ImGuiDrawer::RenderDrawLists(ImDrawData* data) {
 }
 
 ImGuiIO& ImGuiDrawer::GetIO() {
-  current_drawer_ = this;
-  ImGui::SetInternalState(internal_state_.data());
+  ImGui::SetCurrentContext(internal_state_);
   return ImGui::GetIO();
+}
+
+void ImGuiDrawer::RenderDrawLists() {
+  ImGui::SetCurrentContext(internal_state_);
+  auto draw_data = ImGui::GetDrawData();
+  if (draw_data) {
+    RenderDrawLists(draw_data);
+  }
 }
 
 void ImGuiDrawer::OnKeyDown(KeyEvent* e) {
@@ -271,16 +265,27 @@ void ImGuiDrawer::OnKeyChar(KeyEvent* e) {
 void ImGuiDrawer::OnMouseDown(MouseEvent* e) {
   auto& io = GetIO();
   io.MousePos = ImVec2(float(e->x()), float(e->y()));
+  int button = -1;
   switch (e->button()) {
     case xe::ui::MouseEvent::Button::kLeft: {
-      io.MouseDown[0] = true;
-    } break;
+      button = 0;
+      break;
+    }
     case xe::ui::MouseEvent::Button::kRight: {
-      io.MouseDown[1] = true;
-    } break;
+      button = 1;
+      break;
+    }
     default: {
       // Ignored.
-    } break;
+      break;
+    }
+  }
+
+  if (button >= 0 && button < std::size(io.MouseDown)) {
+    if (!ImGui::IsAnyMouseDown()) {
+      window_->CaptureMouse();
+    }
+    io.MouseDown[button] = true;
   }
 }
 
@@ -292,16 +297,27 @@ void ImGuiDrawer::OnMouseMove(MouseEvent* e) {
 void ImGuiDrawer::OnMouseUp(MouseEvent* e) {
   auto& io = GetIO();
   io.MousePos = ImVec2(float(e->x()), float(e->y()));
+  int button = -1;
   switch (e->button()) {
     case xe::ui::MouseEvent::Button::kLeft: {
-      io.MouseDown[0] = false;
-    } break;
+      button = 0;
+      break;
+    }
     case xe::ui::MouseEvent::Button::kRight: {
-      io.MouseDown[1] = false;
-    } break;
+      button = 1;
+      break;
+    }
     default: {
       // Ignored.
-    } break;
+      break;
+    }
+  }
+
+  if (button >= 0 && button < std::size(io.MouseDown)) {
+    io.MouseDown[button] = false;
+    if (!ImGui::IsAnyMouseDown()) {
+      window_->ReleaseMouse();
+    }
   }
 }
 

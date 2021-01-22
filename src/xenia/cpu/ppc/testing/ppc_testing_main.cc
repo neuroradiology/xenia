@@ -2,19 +2,20 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
-#include <gflags/gflags.h>
-
+#include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/main.h"
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/string_buffer.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
+#include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/processor.h"
@@ -24,10 +25,11 @@
 #include "xenia/base/platform_win.h"
 #endif  // XE_COMPILER_MSVC
 
-DEFINE_string(test_path, "src/xenia/cpu/ppc/testing/",
-              "Directory scanned for test files.");
-DEFINE_string(test_bin_path, "src/xenia/cpu/ppc/testing/bin/",
-              "Directory with binary outputs of the test files.");
+DEFINE_path(test_path, "src/xenia/cpu/ppc/testing/",
+            "Directory scanned for test files.", "Other");
+DEFINE_path(test_bin_path, "src/xenia/cpu/ppc/testing/bin/",
+            "Directory with binary outputs of the test files.", "Other");
+DEFINE_transient_string(test_name, "", "Test suite name.", "General");
 
 namespace xe {
 namespace cpu {
@@ -49,43 +51,45 @@ struct TestCase {
 
 class TestSuite {
  public:
-  TestSuite(const std::wstring& src_file_path) : src_file_path(src_file_path) {
-    name = src_file_path.substr(src_file_path.find_last_of(xe::kPathSeparator) +
-                                1);
-    name = ReplaceExtension(name, L"");
-    map_file_path = xe::to_wstring(FLAGS_test_bin_path) + name + L".map";
-    bin_file_path = xe::to_wstring(FLAGS_test_bin_path) + name + L".bin";
+  TestSuite(const std::filesystem::path& src_file_path)
+      : src_file_path_(src_file_path) {
+    auto name = src_file_path.filename();
+    name = name.replace_extension();
+
+    name_ = xe::path_to_utf8(name);
+    map_file_path_ = cvars::test_bin_path / name.replace_extension(".map");
+    bin_file_path_ = cvars::test_bin_path / name.replace_extension(".bin");
   }
 
   bool Load() {
-    if (!ReadMap(map_file_path)) {
-      XELOGE("Unable to read map for test %ls", src_file_path.c_str());
+    if (!ReadMap()) {
+      XELOGE("Unable to read map for test {}",
+             xe::path_to_utf8(src_file_path_));
       return false;
     }
-    if (!ReadAnnotations(src_file_path)) {
-      XELOGE("Unable to read annotations for test %ls", src_file_path.c_str());
+    if (!ReadAnnotations()) {
+      XELOGE("Unable to read annotations for test {}",
+             xe::path_to_utf8(src_file_path_));
       return false;
     }
     return true;
   }
 
-  std::wstring name;
-  std::wstring src_file_path;
-  std::wstring map_file_path;
-  std::wstring bin_file_path;
-  std::vector<TestCase> test_cases;
+  const std::string& name() const { return name_; }
+  const std::filesystem::path& src_file_path() const { return src_file_path_; }
+  const std::filesystem::path& map_file_path() const { return map_file_path_; }
+  const std::filesystem::path& bin_file_path() const { return bin_file_path_; }
+  std::vector<TestCase>& test_cases() { return test_cases_; }
 
  private:
-  std::wstring ReplaceExtension(const std::wstring& path,
-                                const std::wstring& new_extension) {
-    std::wstring result = path;
-    auto last_dot = result.find_last_of('.');
-    result.replace(result.begin() + last_dot, result.end(), new_extension);
-    return result;
-  }
+  std::string name_;
+  std::filesystem::path src_file_path_;
+  std::filesystem::path map_file_path_;
+  std::filesystem::path bin_file_path_;
+  std::vector<TestCase> test_cases_;
 
-  TestCase* FindTestCase(const std::string& name) {
-    for (auto& test_case : test_cases) {
+  TestCase* FindTestCase(const std::string_view name) {
+    for (auto& test_case : test_cases_) {
       if (test_case.name == name) {
         return &test_case;
       }
@@ -93,8 +97,8 @@ class TestSuite {
     return nullptr;
   }
 
-  bool ReadMap(const std::wstring& map_file_path) {
-    FILE* f = fopen(xe::to_string(map_file_path).c_str(), "r");
+  bool ReadMap() {
+    FILE* f = filesystem::OpenFile(map_file_path_, "r");
     if (!f) {
       return false;
     }
@@ -114,15 +118,16 @@ class TestSuite {
       }
       std::string address(line_buffer, t_test_ - line_buffer);
       std::string name(t_test_ + strlen(" t test_"));
-      test_cases.emplace_back(START_ADDRESS + std::stoul(address, 0, 16), name);
+      test_cases_.emplace_back(START_ADDRESS + std::stoul(address, 0, 16),
+                               name);
     }
     fclose(f);
     return true;
   }
 
-  bool ReadAnnotations(const std::wstring& src_file_path) {
+  bool ReadAnnotations() {
     TestCase* current_test_case = nullptr;
-    FILE* f = fopen(xe::to_string(src_file_path).c_str(), "r");
+    FILE* f = filesystem::OpenFile(src_file_path_, "r");
     if (!f) {
       return false;
     }
@@ -141,8 +146,8 @@ class TestSuite {
         std::string label(start + strlen("test_"), strchr(start, ':'));
         current_test_case = FindTestCase(label);
         if (!current_test_case) {
-          XELOGE("Test case %s not found in corresponding map for %ls",
-                 label.c_str(), src_file_path.c_str());
+          XELOGE("Test case {} not found in corresponding map for {}", label,
+                 xe::path_to_utf8(src_file_path_));
           return false;
         }
       } else if (strlen(start) > 3 && start[0] == '#' && start[1] == '_') {
@@ -157,8 +162,8 @@ class TestSuite {
             value.erase(value.end() - 1);
           }
           if (!current_test_case) {
-            XELOGE("Annotation outside of test case in %ls",
-                   src_file_path.c_str());
+            XELOGE("Annotation outside of test case in {}",
+                   xe::path_to_utf8(src_file_path_));
             return false;
           }
           current_test_case->annotations.emplace_back(key, value);
@@ -172,40 +177,56 @@ class TestSuite {
 
 class TestRunner {
  public:
-  TestRunner() {
-    memory_size = 64 * 1024 * 1024;
-    memory.reset(new Memory());
-    memory->Initialize();
+  TestRunner() : memory_size_(64 * 1024 * 1024) {
+    memory_.reset(new Memory());
+    memory_->Initialize();
   }
 
   ~TestRunner() {
-    thread_state.reset();
-    processor.reset();
-    memory.reset();
+    thread_state_.reset();
+    processor_.reset();
+    memory_.reset();
   }
 
   bool Setup(TestSuite& suite) {
     // Reset memory.
-    memory->Reset();
+    memory_->Reset();
+
+    std::unique_ptr<xe::cpu::backend::Backend> backend;
+    if (!backend) {
+#if defined(XENIA_HAS_X64_BACKEND) && XENIA_HAS_X64_BACKEND
+      if (cvars::cpu == "x64") {
+        backend.reset(new xe::cpu::backend::x64::X64Backend());
+      }
+#endif  // XENIA_HAS_X64_BACKEND
+      if (cvars::cpu == "any") {
+#if defined(XENIA_HAS_X64_BACKEND) && XENIA_HAS_X64_BACKEND
+        if (!backend) {
+          backend.reset(new xe::cpu::backend::x64::X64Backend());
+        }
+#endif  // XENIA_HAS_X64_BACKEND
+      }
+    }
 
     // Setup a fresh processor.
-    processor.reset(new Processor(memory.get(), nullptr));
-    processor->Setup();
-    processor->set_debug_info_flags(DebugInfoFlags::kDebugInfoAll);
+    processor_.reset(new Processor(memory_.get(), nullptr));
+    processor_->Setup(std::move(backend));
+    processor_->set_debug_info_flags(DebugInfoFlags::kDebugInfoAll);
 
     // Load the binary module.
-    auto module = std::make_unique<xe::cpu::RawModule>(processor.get());
-    if (!module->LoadFile(START_ADDRESS, suite.bin_file_path)) {
-      XELOGE("Unable to load test binary %ls", suite.bin_file_path.c_str());
+    auto module = std::make_unique<xe::cpu::RawModule>(processor_.get());
+    if (!module->LoadFile(START_ADDRESS, suite.bin_file_path())) {
+      XELOGE("Unable to load test binary {}",
+             xe::path_to_utf8(suite.bin_file_path()));
       return false;
     }
-    processor->AddModule(std::move(module));
+    processor_->AddModule(std::move(module));
 
-    processor->backend()->CommitExecutableRange(START_ADDRESS,
-                                                START_ADDRESS + 1024 * 1024);
+    processor_->backend()->CommitExecutableRange(START_ADDRESS,
+                                                 START_ADDRESS + 1024 * 1024);
 
     // Add dummy space for memory.
-    processor->memory()->LookupHeap(0)->AllocFixed(
+    processor_->memory()->LookupHeap(0)->AllocFixed(
         0x10001000, 0xEFFF, 0,
         kMemoryAllocationReserve | kMemoryAllocationCommit,
         kMemoryProtectRead | kMemoryProtectWrite);
@@ -214,8 +235,8 @@ class TestRunner {
     uint32_t stack_size = 64 * 1024;
     uint32_t stack_address = START_ADDRESS - stack_size;
     uint32_t pcr_address = stack_address - 0x1000;
-    thread_state.reset(
-        new ThreadState(processor.get(), 0x100, stack_address, pcr_address));
+    thread_state_.reset(
+        new ThreadState(processor_.get(), 0x100, stack_address, pcr_address));
 
     return true;
   }
@@ -228,15 +249,15 @@ class TestRunner {
     }
 
     // Execute test.
-    auto fn = processor->ResolveFunction(test_case.address);
+    auto fn = processor_->ResolveFunction(test_case.address);
     if (!fn) {
       XELOGE("Entry function not found");
       return false;
     }
 
-    auto ctx = thread_state->context();
+    auto ctx = thread_state_->context();
     ctx->lr = 0xBCBCBCBC;
-    fn->Call(thread_state.get(), uint32_t(ctx->lr));
+    fn->Call(thread_state_.get(), uint32_t(ctx->lr));
 
     // Assert test state expectations.
     bool result = CheckTestResults(test_case);
@@ -251,7 +272,7 @@ class TestRunner {
   }
 
   bool SetupTestState(TestCase& test_case) {
-    auto ppc_context = thread_state->context();
+    auto ppc_context = thread_state_->context();
     for (auto& it : test_case.annotations) {
       if (it.first == "REGISTER_IN") {
         size_t space_pos = it.second.find(" ");
@@ -263,7 +284,7 @@ class TestRunner {
         auto address_str = it.second.substr(0, space_pos);
         auto bytes_str = it.second.substr(space_pos + 1);
         uint32_t address = std::strtoul(address_str.c_str(), nullptr, 16);
-        auto p = memory->TranslateVirtual(address);
+        auto p = memory_->TranslateVirtual(address);
         const char* c = bytes_str.c_str();
         while (*c) {
           while (*c == ' ') ++c;
@@ -282,9 +303,7 @@ class TestRunner {
   }
 
   bool CheckTestResults(TestCase& test_case) {
-    auto ppc_context = thread_state->context();
-
-    char actual_value[2048];
+    auto ppc_context = thread_state_->context();
 
     bool any_failed = false;
     for (auto& it : test_case.annotations) {
@@ -292,22 +311,26 @@ class TestRunner {
         size_t space_pos = it.second.find(" ");
         auto reg_name = it.second.substr(0, space_pos);
         auto reg_value = it.second.substr(space_pos + 1);
-        if (!ppc_context->CompareRegWithString(reg_name.c_str(),
-                                               reg_value.c_str(), actual_value,
-                                               xe::countof(actual_value))) {
+        std::string actual_value;
+        if (!ppc_context->CompareRegWithString(
+                reg_name.c_str(), reg_value.c_str(), actual_value)) {
           any_failed = true;
-          XELOGE("Register %s assert failed:\n", reg_name.c_str());
-          XELOGE("  Expected: %s == %s\n", reg_name.c_str(), reg_value.c_str());
-          XELOGE("    Actual: %s == %s\n", reg_name.c_str(), actual_value);
+          XELOGE("Register {} assert failed:\n", reg_name);
+          XELOGE("  Expected: {} == {}\n", reg_name, reg_value);
+          XELOGE("    Actual: {} == {}\n", reg_name, actual_value);
         }
       } else if (it.first == "MEMORY_OUT") {
         size_t space_pos = it.second.find(" ");
         auto address_str = it.second.substr(0, space_pos);
         auto bytes_str = it.second.substr(space_pos + 1);
         uint32_t address = std::strtoul(address_str.c_str(), nullptr, 16);
-        auto base_address = memory->TranslateVirtual(address);
+        auto base_address = memory_->TranslateVirtual(address);
         auto p = base_address;
         const char* c = bytes_str.c_str();
+        bool failed = false;
+        size_t count = 0;
+        StringBuffer expecteds;
+        StringBuffer actuals;
         while (*c) {
           while (*c == ' ') ++c;
           if (!*c) {
@@ -315,35 +338,43 @@ class TestRunner {
           }
           char ccs[3] = {c[0], c[1], 0};
           c += 2;
+          count++;
           uint32_t current_address =
               address + static_cast<uint32_t>(p - base_address);
           uint32_t expected = std::strtoul(ccs, nullptr, 16);
           uint8_t actual = *p;
+
+          expecteds.AppendFormat(" %02X", expected);
+          actuals.AppendFormat(" %02X", actual);
+
           if (expected != actual) {
             any_failed = true;
-            XELOGE("Memory %s assert failed:\n", address_str.c_str());
-            XELOGE("  Expected: %.8X %.2X\n", current_address, expected);
-            XELOGE("    Actual: %.8X %.2X\n", current_address, actual);
+            failed = true;
           }
           ++p;
+        }
+        if (failed) {
+          XELOGE("Memory {} assert failed:\n", address_str);
+          XELOGE("  Expected:{}\n", expecteds.to_string());
+          XELOGE("    Actual:{}\n", actuals.to_string());
         }
       }
     }
     return !any_failed;
   }
 
-  size_t memory_size;
-  std::unique_ptr<Memory> memory;
-  std::unique_ptr<Processor> processor;
-  std::unique_ptr<ThreadState> thread_state;
+  size_t memory_size_;
+  std::unique_ptr<Memory> memory_;
+  std::unique_ptr<Processor> processor_;
+  std::unique_ptr<ThreadState> thread_state_;
 };
 
-bool DiscoverTests(std::wstring& test_path,
-                   std::vector<std::wstring>& test_files) {
+bool DiscoverTests(const std::filesystem::path& test_path,
+                   std::vector<std::filesystem::path>& test_files) {
   auto file_infos = xe::filesystem::ListFiles(test_path);
   for (auto& file_info : file_infos) {
-    if (file_info.name.rfind(L".s") == file_info.name.size() - 2) {
-      test_files.push_back(xe::join_paths(test_path, file_info.name));
+    if (file_info.name.extension() == ".s") {
+      test_files.push_back(test_path / file_info.name);
     }
   }
   return true;
@@ -384,14 +415,16 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
 #endif  // XE_COMPILER_MSVC
 }
 
-bool RunTests(const std::wstring& test_name) {
+bool RunTests(const std::string_view test_name) {
   int result_code = 1;
   int failed_count = 0;
   int passed_count = 0;
 
-  auto test_path_root =
-      xe::fix_path_separators(xe::to_wstring(FLAGS_test_path));
-  std::vector<std::wstring> test_files;
+  XELOGI("Haswell instruction usage {}.",
+         cvars::use_haswell_instructions ? "enabled" : "disabled");
+
+  auto test_path_root = cvars::test_path;
+  std::vector<std::filesystem::path> test_files;
   if (!DiscoverTests(test_path_root, test_files)) {
     return false;
   }
@@ -399,33 +432,34 @@ bool RunTests(const std::wstring& test_name) {
     XELOGE("No tests discovered - invalid path?");
     return false;
   }
-  XELOGI("%d tests discovered.", (int)test_files.size());
+  XELOGI("{} tests discovered.", test_files.size());
   XELOGI("");
 
   std::vector<TestSuite> test_suites;
   bool load_failed = false;
   for (auto& test_path : test_files) {
     TestSuite test_suite(test_path);
-    if (!test_name.empty() && test_suite.name != test_name) {
+    if (!test_name.empty() && test_suite.name() != test_name) {
       continue;
     }
     if (!test_suite.Load()) {
-      XELOGE("TEST SUITE %ls FAILED TO LOAD", test_path.c_str());
+      XELOGE("TEST SUITE {} FAILED TO LOAD", xe::path_to_utf8(test_path));
       load_failed = true;
       continue;
     }
     test_suites.push_back(std::move(test_suite));
   }
   if (load_failed) {
-    return false;
+    XELOGE("One or more test suites failed to load.");
   }
 
+  XELOGI("{} tests loaded.", test_suites.size());
   TestRunner runner;
   for (auto& test_suite : test_suites) {
-    XELOGI("%ls.s:", test_suite.name.c_str());
+    XELOGI("{}.s:", test_suite.name());
 
-    for (auto& test_case : test_suite.test_cases) {
-      XELOGI("  - %s", test_case.name.c_str());
+    for (auto& test_case : test_suite.test_cases()) {
+      XELOGI("  - {}", test_case.name);
       ProtectedRunTest(test_suite, runner, test_case, failed_count,
                        passed_count);
     }
@@ -434,26 +468,20 @@ bool RunTests(const std::wstring& test_name) {
   }
 
   XELOGI("");
-  XELOGI("Total tests: %d", failed_count + passed_count);
-  XELOGI("Passed: %d", passed_count);
-  XELOGI("Failed: %d", failed_count);
+  XELOGI("Total tests: {}", failed_count + passed_count);
+  XELOGI("Passed: {}", passed_count);
+  XELOGI("Failed: {}", failed_count);
 
   return failed_count ? false : true;
 }
 
-int main(const std::vector<std::wstring>& args) {
-  // Grab test name, if present.
-  std::wstring test_name;
-  if (args.size() >= 2) {
-    test_name = args[1];
-  }
-
-  return RunTests(test_name) ? 0 : 1;
+int main(const std::vector<std::string>& args) {
+  return RunTests(cvars::test_name) ? 0 : 1;
 }
 
 }  // namespace test
 }  // namespace cpu
 }  // namespace xe
 
-DEFINE_ENTRY_POINT(L"xenia-cpu-ppc-test", L"xenia-cpu-ppc-test [test name]",
-                   xe::cpu::test::main);
+DEFINE_ENTRY_POINT("xenia-cpu-ppc-test", xe::cpu::test::main, "[test name]",
+                   "test_name");

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -249,22 +249,22 @@ enum class PPCRegister {
 typedef struct PPCContext_s {
   // Must be stored at 0x0 for now.
   // TODO(benvanik): find a nice way to describe this to the JIT.
-  ThreadState* thread_state;
+  ThreadState* thread_state;  // 0x0
   // TODO(benvanik): this is getting nasty. Must be here.
-  uint8_t* virtual_membase;
+  uint8_t* virtual_membase;  // 0x8
 
   // Most frequently used registers first.
-  uint64_t lr;      // Link register
-  uint64_t ctr;     // Count register
-  uint64_t r[32];   // General purpose registers
-  double f[32];     // Floating-point registers
-  vec128_t v[128];  // VMX128 vector registers
+  uint64_t lr;      // 0x10 Link register
+  uint64_t ctr;     // 0x18 Count register
+  uint64_t r[32];   // 0x20 General purpose registers
+  double f[32];     // 0x120 Floating-point registers
+  vec128_t v[128];  // 0x220 VMX128 vector registers
 
   // XER register:
   // Split to make it easier to do individual updates.
-  uint8_t xer_ca;
-  uint8_t xer_ov;
-  uint8_t xer_so;
+  uint8_t xer_ca;  // 0xA20
+  uint8_t xer_ov;  // 0xA21
+  uint8_t xer_so;  // 0xA22
 
   // Condition registers:
   // These are split to make it easier to do DCE on unused stores.
@@ -279,7 +279,7 @@ typedef struct PPCContext_s {
                        // successfully
       uint8_t cr0_so;  // Summary Overflow (SO) - copy of XER[SO]
     };
-  } cr0;
+  } cr0;  // 0xA24
   union {
     uint32_t value;
     struct {
@@ -432,7 +432,7 @@ typedef struct PPCContext_s {
 
   void SetRegFromString(const char* name, const char* value);
   bool CompareRegWithString(const char* name, const char* value,
-                            char* out_value, size_t out_value_size) const;
+                            std::string& result) const;
 } PPCContext;
 #pragma pack(pop)
 static_assert(sizeof(PPCContext) % 64 == 0, "64b padded");

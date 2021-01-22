@@ -158,8 +158,10 @@ void AudioSystem::Initialize() {}
 void AudioSystem::Shutdown() {
   worker_running_ = false;
   shutdown_event_->Set();
-  worker_thread_->Wait(0, 0, 0, nullptr);
-  worker_thread_.reset();
+  if (worker_thread_) {
+    worker_thread_->Wait(0, 0, 0, nullptr);
+    worker_thread_.reset();
+  }
 }
 
 X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
@@ -280,7 +282,8 @@ bool AudioSystem::Restore(ByteStream* stream) {
     auto status = CreateDriver(id, client_semaphore, &driver);
     if (XFAILED(status)) {
       XELOGE(
-          "AudioSystem::Restore - Call to CreateDriver failed with status %.8X",
+          "AudioSystem::Restore - Call to CreateDriver failed with status "
+          "{:08X}",
           status);
       return false;
     }
@@ -301,6 +304,8 @@ void AudioSystem::Pause() {
   // Kind of a hack, but it works.
   shutdown_event_->Set();
   pause_fence_.Wait();
+
+  xma_decoder_->Pause();
 }
 
 void AudioSystem::Resume() {
@@ -310,6 +315,8 @@ void AudioSystem::Resume() {
   paused_ = false;
 
   resume_event_->Set();
+
+  xma_decoder_->Resume();
 }
 
 }  // namespace apu

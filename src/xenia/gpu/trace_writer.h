@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,9 +10,10 @@
 #ifndef XENIA_GPU_TRACE_WRITER_H_
 #define XENIA_GPU_TRACE_WRITER_H_
 
+#include <filesystem>
+#include <set>
 #include <string>
 
-#include "xenia/base/filesystem.h"
 #include "xenia/gpu/trace_protocol.h"
 
 namespace xe {
@@ -25,7 +26,7 @@ class TraceWriter {
 
   bool is_open() const { return file_ != nullptr; }
 
-  bool Open(const std::wstring& path, uint32_t title_id);
+  bool Open(const std::filesystem::path& path, uint32_t title_id);
   void Flush();
   void Close();
 
@@ -35,14 +36,20 @@ class TraceWriter {
   void WriteIndirectBufferEnd();
   void WritePacketStart(uint32_t base_ptr, uint32_t count);
   void WritePacketEnd();
-  void WriteMemoryRead(uint32_t base_ptr, size_t length);
-  void WriteMemoryWrite(uint32_t base_ptr, size_t length);
+  void WriteMemoryRead(uint32_t base_ptr, size_t length,
+                       const void* host_ptr = nullptr);
+  void WriteMemoryReadCached(uint32_t base_ptr, size_t length);
+  void WriteMemoryReadCachedNop(uint32_t base_ptr, size_t length);
+  void WriteMemoryWrite(uint32_t base_ptr, size_t length,
+                        const void* host_ptr = nullptr);
+  void WriteEdramSnapshot(const void* snapshot);
   void WriteEvent(EventCommand::Type event_type);
 
  private:
   void WriteMemoryCommand(TraceCommandType type, uint32_t base_ptr,
-                          size_t length);
+                          size_t length, const void* host_ptr = nullptr);
 
+  std::set<uint64_t> cached_memory_reads_;
   uint8_t* membase_;
   FILE* file_;
 

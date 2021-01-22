@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -12,11 +12,13 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <string>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
+#include "xenia/base/platform.h"
 
 namespace xe {
 namespace memory {
@@ -33,6 +35,7 @@ enum class PageAccess {
   kNoAccess = 0,
   kReadOnly = 1 << 0,
   kReadWrite = kReadOnly | 1 << 1,
+  kExecuteReadOnly = kReadOnly | 1 << 2,
   kExecuteReadWrite = kReadWrite | 1 << 2,
 };
 
@@ -45,11 +48,21 @@ enum class AllocationType {
 enum class DeallocationType {
   kRelease = 1 << 0,
   kDecommit = 1 << 1,
-  kDecommitRelease = kRelease | kDecommit,
 };
+
+// Whether the host allows the pages to be allocated or mapped with
+// PageAccess::kExecuteReadWrite - if not, separate mappings backed by the same
+// memory-mapped file must be used to write to executable pages.
+bool IsWritableExecutableMemorySupported();
+
+// Whether PageAccess::kExecuteReadWrite is a supported and preferred way of
+// writing executable memory, useful for simulating how Xenia would work without
+// writable executable memory on a system with it.
+bool IsWritableExecutableMemoryPreferred();
 
 // Allocates a block of memory at the given page-aligned base address.
 // Fails if the memory is not available.
+// Specify nullptr for base_address to leave it up to the system.
 void* AllocFixed(void* base_address, size_t length,
                  AllocationType allocation_type, PageAccess access);
 
@@ -62,7 +75,7 @@ bool DeallocFixed(void* base_address, size_t length,
 // Sets the access rights for the given block of memory and returns the previous
 // access rights. Both base_address and length will be adjusted to page_size().
 bool Protect(void* base_address, size_t length, PageAccess access,
-             PageAccess* out_old_access);
+             PageAccess* out_old_access = nullptr);
 
 // Queries a region of pages to get the access rights. This will modify the
 // length parameter to the length of pages with the same consecutive access
@@ -95,11 +108,21 @@ void AlignedFree(T* ptr) {
 #endif  // XE_COMPILER_MSVC
 }
 
+#if XE_PLATFORM_WIN32
+// HANDLE.
 typedef void* FileMappingHandle;
+constexpr FileMappingHandle kFileMappingHandleInvalid = nullptr;
+#else
+// File descriptor.
+typedef int FileMappingHandle;
+constexpr FileMappingHandle kFileMappingHandleInvalid = -1;
+#endif
 
-FileMappingHandle CreateFileMappingHandle(std::wstring path, size_t length,
-                                          PageAccess access, bool commit);
-void CloseFileMappingHandle(FileMappingHandle handle);
+FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
+                                          size_t length, PageAccess access,
+                                          bool commit);
+void CloseFileMappingHandle(FileMappingHandle handle,
+                            const std::filesystem::path& path);
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
                   PageAccess access, size_t file_offset);
 bool UnmapFileView(FileMappingHandle handle, void* base_address, size_t length);
@@ -121,20 +144,17 @@ inline void* low_address(void* address) {
   return reinterpret_cast<void*>(uint64_t(address) & 0xFFFFFFFF);
 }
 
-void copy_and_swap_16_aligned(uint16_t* dest, const uint16_t* src,
-                              size_t count);
-void copy_and_swap_16_unaligned(uint16_t* dest, const uint16_t* src,
-                                size_t count);
-void copy_and_swap_32_aligned(uint32_t* dest, const uint32_t* src,
-                              size_t count);
-void copy_and_swap_32_unaligned(uint32_t* dest, const uint32_t* src,
-                                size_t count);
-void copy_and_swap_64_aligned(uint64_t* dest, const uint64_t* src,
-                              size_t count);
-void copy_and_swap_64_unaligned(uint64_t* dest, const uint64_t* src,
-                                size_t count);
-void copy_and_swap_16_in_32_aligned(uint32_t* dest, const uint32_t* src,
-                                    size_t count);
+void copy_128_aligned(void* dest, const void* src, size_t count);
+
+void copy_and_swap_16_aligned(void* dest, const void* src, size_t count);
+void copy_and_swap_16_unaligned(void* dest, const void* src, size_t count);
+void copy_and_swap_32_aligned(void* dest, const void* src, size_t count);
+void copy_and_swap_32_unaligned(void* dest, const void* src, size_t count);
+void copy_and_swap_64_aligned(void* dest, const void* src, size_t count);
+void copy_and_swap_64_unaligned(void* dest, const void* src, size_t count);
+void copy_and_swap_16_in_32_aligned(void* dest, const void* src, size_t count);
+void copy_and_swap_16_in_32_unaligned(void* dest, const void* src,
+                                      size_t count);
 
 template <typename T>
 void copy_and_swap(T* dest, const T* src, size_t count) {
@@ -284,8 +304,8 @@ inline std::string load_and_swap<std::string>(const void* mem) {
   return value;
 }
 template <>
-inline std::wstring load_and_swap<std::wstring>(const void* mem) {
-  std::wstring value;
+inline std::u16string load_and_swap<std::u16string>(const void* mem) {
+  std::u16string value;
   for (int i = 0;; ++i) {
     auto c =
         xe::load_and_swap<uint16_t>(reinterpret_cast<const uint16_t*>(mem) + i);
@@ -298,116 +318,127 @@ inline std::wstring load_and_swap<std::wstring>(const void* mem) {
 }
 
 template <typename T>
-void store(void* mem, T value);
+void store(void* mem, const T& value);
 template <>
-inline void store<int8_t>(void* mem, int8_t value) {
+inline void store<int8_t>(void* mem, const int8_t& value) {
   *reinterpret_cast<int8_t*>(mem) = value;
 }
 template <>
-inline void store<uint8_t>(void* mem, uint8_t value) {
+inline void store<uint8_t>(void* mem, const uint8_t& value) {
   *reinterpret_cast<uint8_t*>(mem) = value;
 }
 template <>
-inline void store<int16_t>(void* mem, int16_t value) {
+inline void store<int16_t>(void* mem, const int16_t& value) {
   *reinterpret_cast<int16_t*>(mem) = value;
 }
 template <>
-inline void store<uint16_t>(void* mem, uint16_t value) {
+inline void store<uint16_t>(void* mem, const uint16_t& value) {
   *reinterpret_cast<uint16_t*>(mem) = value;
 }
 template <>
-inline void store<int32_t>(void* mem, int32_t value) {
+inline void store<int32_t>(void* mem, const int32_t& value) {
   *reinterpret_cast<int32_t*>(mem) = value;
 }
 template <>
-inline void store<uint32_t>(void* mem, uint32_t value) {
+inline void store<uint32_t>(void* mem, const uint32_t& value) {
   *reinterpret_cast<uint32_t*>(mem) = value;
 }
 template <>
-inline void store<int64_t>(void* mem, int64_t value) {
+inline void store<int64_t>(void* mem, const int64_t& value) {
   *reinterpret_cast<int64_t*>(mem) = value;
 }
 template <>
-inline void store<uint64_t>(void* mem, uint64_t value) {
+inline void store<uint64_t>(void* mem, const uint64_t& value) {
   *reinterpret_cast<uint64_t*>(mem) = value;
 }
 template <>
-inline void store<float>(void* mem, float value) {
+inline void store<float>(void* mem, const float& value) {
   *reinterpret_cast<float*>(mem) = value;
 }
 template <>
-inline void store<double>(void* mem, double value) {
+inline void store<double>(void* mem, const double& value) {
   *reinterpret_cast<double*>(mem) = value;
 }
 template <typename T>
-inline void store(const void* mem, T value) {
-  if (sizeof(T) == 1) {
+constexpr inline void store(const void* mem, const T& value) {
+  if constexpr (sizeof(T) == 1) {
     store<uint8_t>(mem, static_cast<uint8_t>(value));
-  } else if (sizeof(T) == 2) {
+  } else if constexpr (sizeof(T) == 2) {
     store<uint8_t>(mem, static_cast<uint16_t>(value));
-  } else if (sizeof(T) == 4) {
+  } else if constexpr (sizeof(T) == 4) {
     store<uint8_t>(mem, static_cast<uint32_t>(value));
-  } else if (sizeof(T) == 8) {
+  } else if constexpr (sizeof(T) == 8) {
     store<uint8_t>(mem, static_cast<uint64_t>(value));
   } else {
-    assert_always("Invalid xe::store size");
+    static_assert("Invalid xe::store size");
   }
 }
 
 template <typename T>
-void store_and_swap(void* mem, T value);
+void store_and_swap(void* mem, const T& value);
 template <>
-inline void store_and_swap<int8_t>(void* mem, int8_t value) {
+inline void store_and_swap<int8_t>(void* mem, const int8_t& value) {
   *reinterpret_cast<int8_t*>(mem) = value;
 }
 template <>
-inline void store_and_swap<uint8_t>(void* mem, uint8_t value) {
+inline void store_and_swap<uint8_t>(void* mem, const uint8_t& value) {
   *reinterpret_cast<uint8_t*>(mem) = value;
 }
 template <>
-inline void store_and_swap<int16_t>(void* mem, int16_t value) {
+inline void store_and_swap<int16_t>(void* mem, const int16_t& value) {
   *reinterpret_cast<int16_t*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<uint16_t>(void* mem, uint16_t value) {
+inline void store_and_swap<uint16_t>(void* mem, const uint16_t& value) {
   *reinterpret_cast<uint16_t*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<int32_t>(void* mem, int32_t value) {
+inline void store_and_swap<int32_t>(void* mem, const int32_t& value) {
   *reinterpret_cast<int32_t*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<uint32_t>(void* mem, uint32_t value) {
+inline void store_and_swap<uint32_t>(void* mem, const uint32_t& value) {
   *reinterpret_cast<uint32_t*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<int64_t>(void* mem, int64_t value) {
+inline void store_and_swap<int64_t>(void* mem, const int64_t& value) {
   *reinterpret_cast<int64_t*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<uint64_t>(void* mem, uint64_t value) {
+inline void store_and_swap<uint64_t>(void* mem, const uint64_t& value) {
   *reinterpret_cast<uint64_t*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<float>(void* mem, float value) {
+inline void store_and_swap<float>(void* mem, const float& value) {
   *reinterpret_cast<float*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<double>(void* mem, double value) {
+inline void store_and_swap<double>(void* mem, const double& value) {
   *reinterpret_cast<double*>(mem) = byte_swap(value);
 }
 template <>
-inline void store_and_swap<std::string>(void* mem, std::string value) {
+inline void store_and_swap<std::string_view>(void* mem,
+                                             const std::string_view& value) {
   for (auto i = 0; i < value.size(); ++i) {
     xe::store_and_swap<uint8_t>(reinterpret_cast<uint8_t*>(mem) + i, value[i]);
   }
 }
 template <>
-inline void store_and_swap<std::wstring>(void* mem, std::wstring value) {
+inline void store_and_swap<std::string>(void* mem, const std::string& value) {
+  return store_and_swap<std::string_view>(mem, value);
+}
+template <>
+inline void store_and_swap<std::u16string_view>(
+    void* mem, const std::u16string_view& value) {
   for (auto i = 0; i < value.size(); ++i) {
     xe::store_and_swap<uint16_t>(reinterpret_cast<uint16_t*>(mem) + i,
                                  value[i]);
   }
+}
+template <>
+inline void store_and_swap<std::u16string>(void* mem,
+                                           const std::u16string& value) {
+  return store_and_swap<std::u16string_view>(mem, value);
 }
 
 }  // namespace xe

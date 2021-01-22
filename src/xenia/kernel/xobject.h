@@ -32,7 +32,7 @@ class KernelState;
 template <typename T>
 class object_ref;
 
-// http://www.nirsoft.net/kernel_struct/vista/DISPATCHER_HEADER.html
+// https://www.nirsoft.net/kernel_struct/vista/DISPATCHER_HEADER.html
 typedef struct {
   struct {
     uint8_t type;
@@ -60,7 +60,7 @@ typedef struct {
 } X_DISPATCH_HEADER;
 static_assert_size(X_DISPATCH_HEADER, 0x10);
 
-// http://www.nirsoft.net/kernel_struct/vista/OBJECT_HEADER.html
+// https://www.nirsoft.net/kernel_struct/vista/OBJECT_HEADER.html
 struct X_OBJECT_HEADER {
   xe::be<uint32_t> pointer_count;
   union {
@@ -82,7 +82,7 @@ struct X_OBJECT_HEADER {
   // (There's actually a body field here which is the object itself)
 };
 
-// http://www.nirsoft.net/kernel_struct/vista/OBJECT_CREATE_INFORMATION.html
+// https://www.nirsoft.net/kernel_struct/vista/OBJECT_CREATE_INFORMATION.html
 struct X_OBJECT_CREATE_INFORMATION {
   xe::be<uint32_t> attributes;                  // 0x0
   xe::be<uint32_t> root_directory_ptr;          // 0x4
@@ -109,20 +109,28 @@ struct X_OBJECT_TYPE {
 
 class XObject {
  public:
-  enum Type {
-    kTypeUndefined,
-    kTypeEnumerator,
-    kTypeEvent,
-    kTypeFile,
-    kTypeIOCompletion,
-    kTypeModule,
-    kTypeMutant,
-    kTypeNotifyListener,
-    kTypeSemaphore,
-    kTypeSession,
-    kTypeSocket,
-    kTypeThread,
-    kTypeTimer,
+  // Burnout Paradise needs proper handle value for certain calculations
+  // It gets handle value from TLS (without base handle value is 0x88)
+  // and substract 0xF8000088. Without base we're receiving wrong address
+  // Instead of receiving address that starts with 0x82... we're receiving
+  // one with 0x8A... which causes crash
+  static constexpr uint32_t kHandleBase = 0xF8000000;
+
+  enum class Type : uint32_t {
+    Undefined,
+    Enumerator,
+    Event,
+    File,
+    IOCompletion,
+    Module,
+    Mutant,
+    NotifyListener,
+    Semaphore,
+    Session,
+    Socket,
+    SymbolicLink,
+    Thread,
+    Timer,
   };
 
   XObject(Type type);
@@ -133,7 +141,7 @@ class XObject {
   KernelState* kernel_state() const;
   Memory* memory() const;
 
-  Type type();
+  Type type() const;
 
   // Returns the primary handle of this object.
   X_HANDLE handle() const { return handles_[0]; }

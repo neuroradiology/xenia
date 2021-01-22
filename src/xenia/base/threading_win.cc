@@ -2,16 +2,18 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
-#include "xenia/base/threading.h"
-
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform_win.h"
+#include "xenia/base/threading.h"
+
+typedef HANDLE (*SetThreadDescriptionFn)(HANDLE hThread,
+                                         PCWSTR lpThreadDescription);
 
 namespace xe {
 namespace threading {
@@ -29,7 +31,7 @@ uint32_t current_thread_system_id() {
   return static_cast<uint32_t>(GetCurrentThreadId());
 }
 
-// http://msdn.microsoft.com/en-us/library/xcb2z8hs.aspx
+// https://msdn.microsoft.com/en-us/library/xcb2z8hs.aspx
 #pragma pack(push, 8)
 struct THREADNAME_INFO {
   DWORD dwType;      // Must be 0x1000.
@@ -39,14 +41,14 @@ struct THREADNAME_INFO {
 };
 #pragma pack(pop)
 
-void set_name(DWORD thread_id, const std::string& name) {
+void raise_thread_name_exception(HANDLE thread, const std::string& name) {
   if (!IsDebuggerPresent()) {
     return;
   }
   THREADNAME_INFO info;
   info.dwType = 0x1000;
   info.szName = name.c_str();
-  info.dwThreadID = thread_id;
+  info.dwThreadID = ::GetThreadId(thread);
   info.dwFlags = 0;
   __try {
     RaiseException(0x406D1388, 0, sizeof(info) / sizeof(ULONG_PTR),
@@ -55,12 +57,20 @@ void set_name(DWORD thread_id, const std::string& name) {
   }
 }
 
-void set_name(const std::string& name) {
-  set_name(static_cast<DWORD>(-1), name);
+static void set_name(HANDLE thread, const std::string_view name) {
+  auto kernel = GetModuleHandleW(L"kernel32.dll");
+  if (kernel) {
+    auto func =
+        (SetThreadDescriptionFn)GetProcAddress(kernel, "SetThreadDescription");
+    if (func) {
+      func(thread, reinterpret_cast<PCWSTR>(xe::to_utf16(name).c_str()));
+    }
+  }
+  raise_thread_name_exception(thread, std::string(name));
 }
 
-void set_name(std::thread::native_handle_type handle, const std::string& name) {
-  set_name(GetThreadId(handle), name);
+void set_name(const std::string_view name) {
+  set_name(GetCurrentThread(), name);
 }
 
 void MaybeYield() {
@@ -378,16 +388,16 @@ class Win32Thread : public Win32Handle<Thread> {
     QueueUserAPC(DispatchApc, handle_, reinterpret_cast<ULONG_PTR>(apc_data));
   }
 
-  bool Resume(uint32_t* out_new_suspend_count = nullptr) override {
-    if (out_new_suspend_count) {
-      *out_new_suspend_count = 0;
+  bool Resume(uint32_t* out_previous_suspend_count = nullptr) override {
+    if (out_previous_suspend_count) {
+      *out_previous_suspend_count = 0;
     }
     DWORD result = ResumeThread(handle_);
     if (result == UINT_MAX) {
       return false;
     }
-    if (out_new_suspend_count) {
-      *out_new_suspend_count = result;
+    if (out_previous_suspend_count) {
+      *out_previous_suspend_count = result;
     }
     return true;
   }
@@ -439,7 +449,7 @@ std::unique_ptr<Thread> Thread::Create(CreationParameters params,
   if (handle == INVALID_HANDLE_VALUE) {
     // TODO(benvanik): pass back?
     auto last_error = GetLastError();
-    XELOGE("Unable to CreateThread: %d", last_error);
+    XELOGE("Unable to CreateThread: {}", last_error);
     delete start_data;
     return nullptr;
   }

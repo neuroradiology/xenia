@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -12,6 +12,7 @@
 
 #include <vector>
 
+#include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/arena.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/cpu/hir/block.h"
@@ -68,9 +69,19 @@ class HIRBuilder {
   // static allocations:
   // Value* AllocStatic(size_t length);
 
-  void Comment(const char* value);
+  void Comment(const std::string_view value);
   void Comment(const StringBuffer& value);
-  void CommentFormat(const char* format, ...);
+
+  template <typename... Args>
+  void CommentFormat(const std::string_view format, const Args&... args) {
+    static const uint32_t kMaxCommentSize = 1024;
+    char* p = reinterpret_cast<char*>(arena_->Alloc(kMaxCommentSize));
+    auto result = fmt::format_to_n(p, kMaxCommentSize - 1, format, args...);
+    p[result.size] = '\0';
+    size_t rewind = kMaxCommentSize - 1 - result.size;
+    arena_->Rewind(rewind);
+    CommentBuffer(p);
+  }
 
   void Nop();
 
@@ -97,8 +108,10 @@ class HIRBuilder {
   void BranchTrue(Value* cond, Label* label, uint16_t branch_flags = 0);
   void BranchFalse(Value* cond, Label* label, uint16_t branch_flags = 0);
 
-  // phi type_name, Block* b1, Value* v1, Block* b2, Value* v2, etc
+  Value* AllocValue(TypeName type = INT64_TYPE);
+  Value* CloneValue(Value* source);
 
+  // phi type_name, Block* b1, Value* v1, Block* b2, Value* v2, etc
   Value* Assign(Value* value);
   Value* Cast(Value* value, TypeName target_type);
   Value* ZeroExtend(Value* value, TypeName target_type);
@@ -147,12 +160,19 @@ class HIRBuilder {
   Value* LoadMmio(cpu::MMIORange* mmio_range, uint32_t address, TypeName type);
   void StoreMmio(cpu::MMIORange* mmio_range, uint32_t address, Value* value);
 
+  Value* LoadOffset(Value* address, Value* offset, TypeName type,
+                    uint32_t load_flags = 0);
+  void StoreOffset(Value* address, Value* offset, Value* value,
+                   uint32_t store_flags = 0);
+
   Value* Load(Value* address, TypeName type, uint32_t load_flags = 0);
   void Store(Value* address, Value* value, uint32_t store_flags = 0);
   void Memset(Value* address, Value* value, Value* length);
-  void Prefetch(Value* address, size_t length, uint32_t prefetch_flags = 0);
+  void CacheControl(Value* address, size_t cache_line_size,
+                    CacheControlType type);
   void MemoryBarrier();
 
+  void SetRoundingMode(Value* value);
   Value* Max(Value* value1, Value* value2);
   Value* VectorMax(Value* value1, Value* value2, TypeName part_type,
                    uint32_t arithmetic_flags = 0);
@@ -162,6 +182,7 @@ class HIRBuilder {
   Value* Select(Value* cond, Value* value1, Value* value2);
   Value* IsTrue(Value* value);
   Value* IsFalse(Value* value);
+  Value* IsNan(Value* value);
   Value* CompareEQ(Value* value1, Value* value2);
   Value* CompareNE(Value* value1, Value* value2);
   Value* CompareSLT(Value* value1, Value* value2);
@@ -196,6 +217,7 @@ class HIRBuilder {
   Value* Abs(Value* value);
   Value* Sqrt(Value* value);
   Value* RSqrt(Value* value);
+  Value* Recip(Value* value);
   Value* Pow2(Value* value);
   Value* Log2(Value* value);
   Value* DotProduct3(Value* value1, Value* value2);
@@ -245,14 +267,12 @@ class HIRBuilder {
   void DumpValue(StringBuffer* str, Value* value);
   void DumpOp(StringBuffer* str, OpcodeSignatureType sig_type, Instr::Op* op);
 
-  Value* AllocValue(TypeName type = INT64_TYPE);
-  Value* CloneValue(Value* source);
-
  private:
   Block* AppendBlock();
   void EndBlock();
   bool IsUnconditionalJump(Instr* instr);
   Instr* AppendInstr(const OpcodeInfo& opcode, uint16_t flags, Value* dest = 0);
+  void CommentBuffer(const char* p);
   Value* CompareXX(const OpcodeInfo& opcode, Value* value1, Value* value2);
   Value* VectorCompareXX(const OpcodeInfo& opcode, Value* value1, Value* value2,
                          TypeName part_type);

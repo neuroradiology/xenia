@@ -2,15 +2,13 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #ifndef XENIA_KERNEL_KERNEL_STATE_H_
 #define XENIA_KERNEL_KERNEL_STATE_H_
-
-#include <gflags/gflags.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -20,6 +18,7 @@
 #include <vector>
 
 #include "xenia/base/bit_map.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/export_resolver.h"
 #include "xenia/kernel/util/native_list.h"
@@ -39,8 +38,6 @@ class Processor;
 }  // namespace cpu
 }  // namespace xe
 
-DECLARE_bool(headless);
-
 namespace xe {
 namespace kernel {
 
@@ -48,7 +45,7 @@ class Dispatcher;
 class XHostThread;
 class KernelModule;
 class XModule;
-class NotifyListener;
+class XNotifyListener;
 class XThread;
 class UserModule;
 
@@ -64,17 +61,17 @@ struct ProcessInfoBlock {
   xe::be<uint32_t> unk_0C;
   xe::be<uint32_t> unk_10;
   xe::be<uint32_t> thread_count;
-  xe::be<uint8_t> unk_18;
-  xe::be<uint8_t> unk_19;
-  xe::be<uint8_t> unk_1A;
-  xe::be<uint8_t> unk_1B;
+  uint8_t unk_18;
+  uint8_t unk_19;
+  uint8_t unk_1A;
+  uint8_t unk_1B;
   xe::be<uint32_t> kernel_stack_size;
   xe::be<uint32_t> unk_20;
   xe::be<uint32_t> tls_data_size;
   xe::be<uint32_t> tls_raw_data_size;
   xe::be<uint16_t> tls_slot_size;
-  xe::be<uint8_t> unk_2E;
-  xe::be<uint8_t> process_type;
+  uint8_t unk_2E;
+  uint8_t process_type;
   xe::be<uint32_t> bitmap[0x20 / 4];
   xe::be<uint32_t> unk_50;
   xe::be<uint32_t> unk_54;  // blink
@@ -126,15 +123,19 @@ class KernelState {
   void UnregisterModule(XModule* module);
   bool RegisterUserModule(object_ref<UserModule> module);
   void UnregisterUserModule(UserModule* module);
-  bool IsKernelModule(const char* name);
-  object_ref<XModule> GetModule(const char* name, bool user_only = false);
+  bool IsKernelModule(const std::string_view name);
+  object_ref<XModule> GetModule(const std::string_view name,
+                                bool user_only = false);
 
+  object_ref<XThread> LaunchModule(object_ref<UserModule> module);
   object_ref<UserModule> GetExecutableModule();
   void SetExecutableModule(object_ref<UserModule> module);
-  object_ref<UserModule> LoadUserModule(const char* name,
+  object_ref<UserModule> LoadUserModule(const std::string_view name,
                                         bool call_entry = true);
+  void UnloadUserModule(const object_ref<UserModule>& module,
+                        bool call_entry = true);
 
-  object_ref<KernelModule> GetKernelModule(const char* name);
+  object_ref<KernelModule> GetKernelModule(const std::string_view name);
   template <typename T>
   object_ref<KernelModule> LoadKernelModule() {
     auto kernel_module = object_ref<KernelModule>(new T(emulator_, this));
@@ -142,7 +143,7 @@ class KernelState {
     return kernel_module;
   }
   template <typename T>
-  object_ref<T> GetKernelModule(const char* name) {
+  object_ref<T> GetKernelModule(const std::string_view name) {
     auto module = GetKernelModule(name);
     return object_ref<T>(reinterpret_cast<T*>(module.release()));
   }
@@ -157,8 +158,8 @@ class KernelState {
   void OnThreadExit(XThread* thread);
   object_ref<XThread> GetThreadByID(uint32_t thread_id);
 
-  void RegisterNotifyListener(NotifyListener* listener);
-  void UnregisterNotifyListener(NotifyListener* listener);
+  void RegisterNotifyListener(XNotifyListener* listener);
+  void UnregisterNotifyListener(XNotifyListener* listener);
   void BroadcastNotification(XNotificationID id, uint32_t data);
 
   util::NativeList* dpc_list() { return &dpc_list_; }
@@ -166,14 +167,29 @@ class KernelState {
   void CompleteOverlapped(uint32_t overlapped_ptr, X_RESULT result);
   void CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
                             uint32_t extended_error, uint32_t length);
+
   void CompleteOverlappedImmediate(uint32_t overlapped_ptr, X_RESULT result);
   void CompleteOverlappedImmediateEx(uint32_t overlapped_ptr, X_RESULT result,
                                      uint32_t extended_error, uint32_t length);
-  void CompleteOverlappedDeferred(std::function<void()> completion_callback,
-                                  uint32_t overlapped_ptr, X_RESULT result);
-  void CompleteOverlappedDeferredEx(std::function<void()> completion_callback,
-                                    uint32_t overlapped_ptr, X_RESULT result,
-                                    uint32_t extended_error, uint32_t length);
+
+  void CompleteOverlappedDeferred(
+      std::function<void()> completion_callback, uint32_t overlapped_ptr,
+      X_RESULT result, std::function<void()> pre_callback = nullptr,
+      std::function<void()> post_callback = nullptr);
+  void CompleteOverlappedDeferredEx(
+      std::function<void()> completion_callback, uint32_t overlapped_ptr,
+      X_RESULT result, uint32_t extended_error, uint32_t length,
+      std::function<void()> pre_callback = nullptr,
+      std::function<void()> post_callback = nullptr);
+
+  void CompleteOverlappedDeferred(
+      std::function<X_RESULT()> completion_callback, uint32_t overlapped_ptr,
+      std::function<void()> pre_callback = nullptr,
+      std::function<void()> post_callback = nullptr);
+  void CompleteOverlappedDeferredEx(
+      std::function<X_RESULT(uint32_t&, uint32_t&)> completion_callback,
+      uint32_t overlapped_ptr, std::function<void()> pre_callback = nullptr,
+      std::function<void()> post_callback = nullptr);
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
@@ -195,7 +211,7 @@ class KernelState {
   // Must be guarded by the global critical region.
   util::ObjectTable object_table_;
   std::unordered_map<uint32_t, XThread*> threads_by_id_;
-  std::vector<object_ref<NotifyListener>> notify_listeners_;
+  std::vector<object_ref<XNotifyListener>> notify_listeners_;
   bool has_notified_startup_ = false;
 
   uint32_t process_type_ = X_PROCTYPE_USER;

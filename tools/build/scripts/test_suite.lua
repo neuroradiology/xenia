@@ -25,10 +25,13 @@ local function combined_test_suite(test_suite_name, project_root, base_path, con
       project_root.."/"..build_bin,
     }))
     links(merge_arrays(config["links"], {
-      "gflags",
     }))
+    defines({
+      "XE_TEST_SUITE_NAME=\""..test_suite_name.."\"",
+    })
     files({
       project_root.."/"..build_tools_src.."/test_suite_main.cc",
+      project_root.."/src/xenia/base/main_"..platform_suffix..".cc",
       base_path.."/**_test.cc",
     })
 end
@@ -50,7 +53,6 @@ local function split_test_suite(test_suite_name, project_root, base_path, config
         project_root.."/"..build_bin,
       }))
       links(merge_arrays(config["links"], {
-        "gflags",
       }))
       files({
         project_root.."/"..build_tools_src.."/test_suite_main.cc",

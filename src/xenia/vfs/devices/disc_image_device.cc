@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -18,14 +18,14 @@ namespace vfs {
 
 const size_t kXESectorSize = 2048;
 
-DiscImageDevice::DiscImageDevice(const std::string& mount_path,
-                                 const std::wstring& local_path)
-    : Device(mount_path), local_path_(local_path) {}
+DiscImageDevice::DiscImageDevice(const std::string_view mount_path,
+                                 const std::filesystem::path& host_path)
+    : Device(mount_path), name_("GDFX"), host_path_(host_path) {}
 
 DiscImageDevice::~DiscImageDevice() = default;
 
 bool DiscImageDevice::Initialize() {
-  mmap_ = MappedMemory::Open(local_path_, MappedMemory::Mode::kRead);
+  mmap_ = MappedMemory::Open(host_path_, MappedMemory::Mode::kRead);
   if (!mmap_) {
     XELOGE("Disc image could not be mapped");
     return false;
@@ -36,17 +36,30 @@ bool DiscImageDevice::Initialize() {
   state.size = mmap_->size();
   auto result = Verify(&state);
   if (result != Error::kSuccess) {
-    XELOGE("Failed to verify disc image header: %d", result);
+    XELOGE("Failed to verify disc image header: {}", result);
     return false;
   }
 
   result = ReadAllEntries(&state, state.ptr + state.root_offset);
   if (result != Error::kSuccess) {
-    XELOGE("Failed to read all GDFX entries: %d", result);
+    XELOGE("Failed to read all GDFX entries: {}", result);
     return false;
   }
 
   return true;
+}
+
+void DiscImageDevice::Dump(StringBuffer* string_buffer) {
+  auto global_lock = global_critical_region_.Acquire();
+  root_entry_->Dump(string_buffer, 0);
+}
+
+Entry* DiscImageDevice::ResolvePath(const std::string_view path) {
+  // The filesystem will have stripped our prefix off already, so the path will
+  // be in the form:
+  // some\PATH.foo
+  XELOGFS("DiscImageDevice::ResolvePath({})", path);
+  return root_entry_->ResolvePath(path);
 }
 
 DiscImageDevice::Error DiscImageDevice::Verify(ParseState* state) {
@@ -116,20 +129,23 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer,
   size_t length = xe::load<uint32_t>(p + 8);
   uint8_t attributes = xe::load<uint8_t>(p + 12);
   uint8_t name_length = xe::load<uint8_t>(p + 13);
-  auto name = reinterpret_cast<const char*>(p + 14);
+  auto name_buffer = reinterpret_cast<const char*>(p + 14);
 
   if (node_l && !ReadEntry(state, buffer, node_l, parent)) {
     return false;
   }
 
-  auto entry = DiscImageEntry::Create(
-      this, parent, std::string(name, name_length), mmap_.get());
+  auto name = std::string(name_buffer, name_length);
+
+  auto entry = DiscImageEntry::Create(this, parent, name, mmap_.get());
   entry->attributes_ = attributes | kFileAttributeReadOnly;
   entry->size_ = length;
   entry->allocation_size_ = xe::round_up(length, bytes_per_sector());
-  entry->create_timestamp_ = 0;
-  entry->access_timestamp_ = 0;
-  entry->write_timestamp_ = 0;
+
+  // Set to January 1, 1970 (UTC) in 100-nanosecond intervals
+  entry->create_timestamp_ = 10000 * 11644473600000LL;
+  entry->access_timestamp_ = 10000 * 11644473600000LL;
+  entry->write_timestamp_ = 10000 * 11644473600000LL;
 
   if (attributes & kFileAttributeDirectory) {
     // Folder.

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -15,6 +15,7 @@
 
 #include "xenia/base/mutex.h"
 #include "xenia/base/threading.h"
+#include "xenia/cpu/thread.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/util/native_list.h"
 #include "xenia/kernel/xmutant.h"
@@ -38,10 +39,10 @@ struct XAPC {
   // KAPC is 0x28(40) bytes? (what's passed to ExAllocatePoolWithTag)
   // This is 4b shorter than NT - looks like the reserved dword at +4 is gone.
   // NOTE: stored in guest memory.
-  xe::be<uint8_t> type;              // +0
-  xe::be<uint8_t> unk1;              // +1
-  xe::be<uint8_t> processor_mode;    // +2
-  xe::be<uint8_t> enqueued;          // +3
+  uint8_t type;                      // +0
+  uint8_t unk1;                      // +1
+  uint8_t processor_mode;            // +2
+  uint8_t enqueued;                  // +3
   xe::be<uint32_t> thread_ptr;       // +4
   xe::be<uint32_t> flink;            // +8
   xe::be<uint32_t> blink;            // +12
@@ -69,42 +70,80 @@ struct XAPC {
 // Processor Control Region
 struct X_KPCR {
   xe::be<uint32_t> tls_ptr;         // 0x0
-  char unk_04[0x2C];                // 0x4
+  uint8_t unk_04[0x2C];             // 0x4
   xe::be<uint32_t> pcr_ptr;         // 0x30
-  char unk_34[0x3C];                // 0x34
+  uint8_t unk_34[0x3C];             // 0x34
   xe::be<uint32_t> stack_base_ptr;  // 0x70 Stack base address (high addr)
   xe::be<uint32_t> stack_end_ptr;   // 0x74 Stack end (low addr)
-  char unk_78[0x88];                // 0x78
+  uint8_t unk_78[0x88];             // 0x78
   xe::be<uint32_t> current_thread;  // 0x100
-  char unk_104[0x8];                // 0x104
-  xe::be<uint8_t> current_cpu;      // 0x10C
-  char unk_10D[0x43];               // 0x10D
+  uint8_t unk_104[0x8];             // 0x104
+  uint8_t current_cpu;              // 0x10C
+  uint8_t unk_10D[0x43];            // 0x10D
   xe::be<uint32_t> dpc_active;      // 0x150
 };
 
 struct X_KTHREAD {
-  X_DISPATCH_HEADER header;      // 0x0
-  char unk_10[0xAC];             // 0x10
-  uint8_t suspend_count;         // 0xBC
-  uint8_t unk_BD;                // 0xBD
-  uint16_t unk_BE;               // 0xBE
-  char unk_C0[0x70];             // 0xC0
-  xe::be<uint64_t> create_time;  // 0x130
-  xe::be<uint64_t> exit_time;    // 0x138
-  xe::be<uint32_t> exit_status;  // 0x140
-  char unk_144[0x8];             // 0x144
-  xe::be<uint32_t> thread_id;    // 0x14C
-  char unk_150[0x10];            // 0x150
-  xe::be<uint32_t> last_error;   // 0x160
-  char unk_164[0x94C];           // 0x164
+  X_DISPATCH_HEADER header;           // 0x0
+  xe::be<uint32_t> unk_10;            // 0x10
+  xe::be<uint32_t> unk_14;            // 0x14
+  uint8_t unk_18[0x28];               // 0x10
+  xe::be<uint32_t> unk_40;            // 0x40
+  xe::be<uint32_t> unk_44;            // 0x44
+  xe::be<uint32_t> unk_48;            // 0x48
+  xe::be<uint32_t> unk_4C;            // 0x4C
+  uint8_t unk_50[0x4];                // 0x50
+  xe::be<uint16_t> unk_54;            // 0x54
+  xe::be<uint16_t> unk_56;            // 0x56
+  uint8_t unk_58[0x4];                // 0x58
+  xe::be<uint32_t> stack_base;        // 0x5C
+  xe::be<uint32_t> stack_limit;       // 0x60
+  uint8_t unk_64[0x4];                // 0x64
+  xe::be<uint32_t> tls_address;       // 0x68
+  uint8_t unk_6C;                     // 0x6C
+  uint8_t unk_6D[0x7];                // 0x6D
+  xe::be<uint32_t> unk_74;            // 0x74
+  xe::be<uint32_t> unk_78;            // 0x78
+  xe::be<uint32_t> unk_7C;            // 0x7C
+  xe::be<uint32_t> unk_80;            // 0x80
+  xe::be<uint32_t> unk_84;            // 0x84
+  uint8_t unk_88[0x3];                // 0x88
+  uint8_t unk_8B;                     // 0x8B
+  uint8_t unk_8C[0x10];               // 0x8C
+  xe::be<uint32_t> unk_9C;            // 0x9C
+  uint8_t unk_A0[0x1C];               // 0xA0
+  uint8_t suspend_count;              // 0xBC
+  uint8_t unk_BD;                     // 0xBD
+  uint8_t unk_BE;                     // 0xBE
+  uint8_t current_cpu;                // 0xBF
+  uint8_t unk_C0[0x10];               // 0xC0
+  xe::be<uint32_t> stack_alloc_base;  // 0xD0
+  uint8_t unk_D4[0x5C];               // 0xD4
+  xe::be<uint64_t> create_time;       // 0x130
+  xe::be<uint64_t> exit_time;         // 0x138
+  xe::be<uint32_t> exit_status;       // 0x140
+  xe::be<uint32_t> unk_144;           // 0x144
+  xe::be<uint32_t> unk_148;           // 0x148
+  xe::be<uint32_t> thread_id;         // 0x14C
+  xe::be<uint32_t> start_address;     // 0x150
+  xe::be<uint32_t> unk_154;           // 0x154
+  xe::be<uint32_t> unk_158;           // 0x158
+  uint8_t unk_15C[0x4];               // 0x15C
+  xe::be<uint32_t> last_error;        // 0x160
+  xe::be<uint32_t> fiber_ptr;         // 0x164
+  uint8_t unk_168[0x4];               // 0x168
+  xe::be<uint32_t> creation_flags;    // 0x16C
+  uint8_t unk_170[0xC];               // 0x170
+  xe::be<uint32_t> unk_17C;           // 0x17C
+  uint8_t unk_180[0x930];             // 0x180
 
   // This struct is actually quite long... so uh, not filling this out!
 };
 static_assert_size(X_KTHREAD, 0xAB0);
 
-class XThread : public XObject {
+class XThread : public XObject, public cpu::Thread {
  public:
-  static const Type kType = kTypeThread;
+  static const XObject::Type kObjectType = XObject::Type::Thread;
 
   struct CreationParams {
     uint32_t stack_size;
@@ -136,25 +175,20 @@ class XThread : public XObject {
   // True if the thread is created by the guest app.
   bool is_guest_thread() const { return guest_thread_; }
   bool main_thread() const { return main_thread_; }
-  // True if the thread should be paused by the debugger.
-  // All threads that can run guest code must be stopped for the debugger to
-  // work properly.
-  bool can_debugger_suspend() const { return can_debugger_suspend_; }
-  void set_can_debugger_suspend(bool value) { can_debugger_suspend_ = value; }
   bool is_running() const { return running_; }
 
-  cpu::ThreadState* thread_state() const { return thread_state_; }
   uint32_t thread_id() const { return thread_id_; }
   uint32_t last_error();
   void set_last_error(uint32_t error_code);
-  const std::string& name() const { return name_; }
-  void set_name(const std::string& name);
+  void set_name(const std::string_view name);
 
   X_STATUS Create();
   X_STATUS Exit(int exit_code);
   X_STATUS Terminate(int exit_code);
 
   virtual void Execute();
+
+  virtual void Reenter(uint32_t address);
 
   static void EnterCriticalRegion();
   static void LeaveCriticalRegion();
@@ -171,10 +205,17 @@ class XThread : public XObject {
   int32_t priority() const { return priority_; }
   int32_t QueryPriority();
   void SetPriority(int32_t increment);
-  uint32_t affinity() const { return affinity_; }
+
+  // Xbox thread IDs:
+  // 0 - core 0, thread 0 - user
+  // 1 - core 0, thread 1 - user
+  // 2 - core 1, thread 0 - sometimes xcontent
+  // 3 - core 1, thread 1 - user
+  // 4 - core 2, thread 0 - xaudio
+  // 5 - core 2, thread 1 - user
   void SetAffinity(uint32_t affinity);
-  uint32_t active_cpu() const;
-  void SetActiveCpu(uint32_t cpu_index);
+  uint8_t active_cpu() const;
+  void SetActiveCpu(uint8_t cpu_index);
 
   bool GetTLSValue(uint32_t slot, uint32_t* value_out);
   bool SetTLSValue(uint32_t slot, uint32_t value);
@@ -211,7 +252,6 @@ class XThread : public XObject {
   std::vector<object_ref<XMutant>> pending_mutant_acquires_;
 
   uint32_t thread_id_ = 0;
-  std::unique_ptr<xe::threading::Thread> thread_;
   uint32_t scratch_address_ = 0;
   uint32_t scratch_size_ = 0;
   uint32_t tls_static_address_ = 0;
@@ -222,16 +262,11 @@ class XThread : public XObject {
   uint32_t stack_alloc_size_ = 0;  // Stack alloc size
   uint32_t stack_base_ = 0;        // High address
   uint32_t stack_limit_ = 0;       // Low address
-  cpu::ThreadState* thread_state_ = nullptr;
   bool guest_thread_ = false;
   bool main_thread_ = false;  // Entry-point thread
-  bool can_debugger_suspend_ = true;
   bool running_ = false;
 
-  std::string name_;
-
   int32_t priority_ = 0;
-  uint32_t affinity_ = 0;
 
   xe::global_critical_region global_critical_region_;
   std::atomic<uint32_t> irql_ = {0};

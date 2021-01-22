@@ -2,17 +2,20 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/kernel/xthread.h"
 
-#include <gflags/gflags.h>
-
 #include <cstring>
 
+#ifdef XE_PLATFORM_WIN32
+#include <objbase.h>
+#endif
+
+#include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -29,9 +32,9 @@
 #include "xenia/kernel/xmutant.h"
 
 DEFINE_bool(ignore_thread_priorities, true,
-            "Ignores game-specified thread priorities.");
+            "Ignores game-specified thread priorities.", "Kernel");
 DEFINE_bool(ignore_thread_affinities, true,
-            "Ignores game-specified thread affinities.");
+            "Ignores game-specified thread affinities.", "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -43,16 +46,15 @@ const uint32_t XAPC::kDummyRundownRoutine;
 using xe::cpu::ppc::PPCOpcode;
 
 uint32_t next_xthread_id_ = 0;
-thread_local XThread* current_thread_tls_ = nullptr;
 
 XThread::XThread(KernelState* kernel_state)
-    : XObject(kernel_state, kTypeThread), guest_thread_(true) {}
+    : XObject(kernel_state, kObjectType), guest_thread_(true) {}
 
 XThread::XThread(KernelState* kernel_state, uint32_t stack_size,
                  uint32_t xapi_thread_startup, uint32_t start_address,
                  uint32_t start_context, uint32_t creation_flags,
                  bool guest_thread, bool main_thread)
-    : XObject(kernel_state, kTypeThread),
+    : XObject(kernel_state, kObjectType),
       thread_id_(++next_xthread_id_),
       guest_thread_(guest_thread),
       main_thread_(main_thread),
@@ -102,13 +104,16 @@ XThread::~XThread() {
   }
 }
 
+thread_local XThread* current_xthread_tls_ = nullptr;
+
+bool XThread::IsInThread() { return Thread::IsInThread(); }
+
 bool XThread::IsInThread(XThread* other) {
-  return current_thread_tls_ == other;
+  return current_xthread_tls_ == other;
 }
-bool XThread::IsInThread() { return current_thread_tls_ != nullptr; }
 
 XThread* XThread::GetCurrentThread() {
-  XThread* thread = current_thread_tls_;
+  XThread* thread = reinterpret_cast<XThread*>(current_xthread_tls_);
   if (!thread) {
     assert_always("Attempting to use kernel stuff from a non-kernel thread");
   }
@@ -141,30 +146,33 @@ void XThread::set_last_error(uint32_t error_code) {
   guest_object<X_KTHREAD>()->last_error = error_code;
 }
 
-void XThread::set_name(const std::string& name) {
-  name_ = xe::format_string("%s (%.8X)", name.c_str(), handle());
+void XThread::set_name(const std::string_view name) {
+  thread_name_ = fmt::format("{} ({:08X})", name, handle());
 
   if (thread_) {
     // May be getting set before the thread is created.
     // One the thread is ready it will handle it.
-    thread_->set_name(name_);
+    thread_->set_name(thread_name_);
   }
 }
 
-uint8_t next_cpu = 0;
-uint8_t GetFakeCpuNumber(uint8_t proc_mask) {
+static uint8_t next_cpu = 0;
+static uint8_t GetFakeCpuNumber(uint8_t proc_mask) {
+  // NOTE: proc_mask is logical processors, not physical processors or cores.
   if (!proc_mask) {
-    next_cpu++;
-    if (next_cpu > 6) {
-      next_cpu = 0;
-    }
-
+    next_cpu = (next_cpu + 1) % 6;
     return next_cpu;  // is this reasonable?
+    // TODO(Triang3l): Does the following apply here?
+    // https://docs.microsoft.com/en-us/windows/win32/dxtecharts/coding-for-multiple-cores
+    // "On Xbox 360, you must explicitly assign software threads to a particular
+    //  hardware thread by using XSetThreadProcessor. Otherwise, all child
+    //  threads will stay on the same hardware thread as the parent."
   }
   assert_false(proc_mask & 0xC0);
 
   uint8_t cpu_number = 7 - xe::lzcnt(proc_mask);
   assert_true(1 << cpu_number == proc_mask);
+  assert_true(cpu_number < 6);
   return cpu_number;
 }
 
@@ -203,6 +211,7 @@ void XThread::InitializeGuestObject() {
   // 0xA88 = APC
   // 0x18 = timer
   xe::store_and_swap<uint32_t>(p + 0x09C, 0xFDFFD7FF);
+  // current_cpu is expected to be initialized externally via SetActiveCpu.
   xe::store_and_swap<uint32_t>(p + 0x0D0, stack_base_);
   xe::store_and_swap<uint64_t>(p + 0x130, Clock::QueryGuestSystemTime());
   xe::store_and_swap<uint32_t>(p + 0x144, guest_object() + 0x144);
@@ -314,7 +323,7 @@ X_STATUS XThread::Create() {
   }
 
   // Allocate thread state block from heap.
-  // http://www.microsoft.com/msj/archive/s2ce.aspx
+  // https://web.archive.org/web/20170704035330/https://www.microsoft.com/msj/archive/S2CE.aspx
   // This is set as r13 for user code and some special inlined Win32 calls
   // (like GetLastError/etc) will poke it directly.
   // We try to use it as our primary store of data just to keep things all
@@ -338,11 +347,17 @@ X_STATUS XThread::Create() {
   // This is thread safe.
   thread_state_ = new cpu::ThreadState(kernel_state()->processor(), thread_id_,
                                        stack_base_, pcr_address_);
-  XELOGI("XThread%08X (%X) Stack: %.8X-%.8X", handle(), thread_id_,
+  XELOGI("XThread{:08X} ({:X}) Stack: {:08X}-{:08X}", handle(), thread_id_,
          stack_limit_, stack_base_);
 
   // Exports use this to get the kernel.
   thread_state_->context()->kernel_state = kernel_state_;
+
+  uint8_t cpu_index = GetFakeCpuNumber(
+      static_cast<uint8_t>(creation_params_.creation_flags >> 24));
+
+  // Initialize the KTHREAD object.
+  InitializeGuestObject();
 
   X_KPCR* pcr = memory()->TranslateVirtual<X_KPCR*>(pcr_address_);
 
@@ -353,17 +368,10 @@ X_STATUS XThread::Create() {
   pcr->stack_base_ptr = stack_base_;
   pcr->stack_end_ptr = stack_limit_;
 
-  uint8_t proc_mask =
-      static_cast<uint8_t>(creation_params_.creation_flags >> 24);
-
-  pcr->current_cpu = GetFakeCpuNumber(proc_mask);  // Current CPU(?)
-  pcr->dpc_active = 0;                             // DPC active bool?
-
-  // Initialize the KTHREAD object.
-  InitializeGuestObject();
+  pcr->dpc_active = 0;  // DPC active bool?
 
   // Always retain when starting - the thread owns itself until exited.
-  Retain();
+  RetainHandle();
 
   xe::threading::Thread::CreationParameters params;
   params.stack_size = 16 * 1024 * 1024;  // Allocate a big host stack.
@@ -373,22 +381,38 @@ X_STATUS XThread::Create() {
     xe::threading::set_current_thread_id(handle());
 
     // Set name immediately, if we have one.
-    thread_->set_name(name());
+    thread_->set_name(thread_name_);
+
+#ifdef XE_PLATFORM_WIN32
+    // Setup COM on this thread.
+    //
+    // https://devblogs.microsoft.com/oldnewthing/?p=4613
+    //
+    // "If any thread in the process calls CoInitialize[Ex] with the
+    // COINIT_MULTITHREADED flag, then that not only initializes the current
+    // thread as a member of the multi-threaded apartment, but it also says,
+    // "Any thread which has never called CoInitialize[Ex] is also part of the
+    // multi-threaded apartment."
+#pragma warning(suppress : 6031)
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 
     // Profiler needs to know about the thread.
-    xe::Profiler::ThreadEnter(name().c_str());
+    xe::Profiler::ThreadEnter(thread_name_.c_str());
 
     // Execute user code.
-    current_thread_tls_ = this;
+    current_xthread_tls_ = this;
+    current_thread_ = this;
     running_ = true;
     Execute();
     running_ = false;
-    current_thread_tls_ = nullptr;
+    current_thread_ = nullptr;
+    current_xthread_tls_ = nullptr;
 
     xe::Profiler::ThreadExit();
 
     // Release the self-reference to the thread.
-    Release();
+    ReleaseHandle();
   });
 
   if (!thread_) {
@@ -396,19 +420,19 @@ X_STATUS XThread::Create() {
     XELOGE("CreateThread failed");
     return X_STATUS_NO_MEMORY;
   }
-  thread_->set_affinity_mask(proc_mask);
 
   // Set the thread name based on host ID (for easier debugging).
-  if (name_.empty()) {
-    char thread_name[32];
-    snprintf(thread_name, xe::countof(thread_name), "XThread%.04X",
-             thread_->system_id());
-    set_name(thread_name);
+  if (thread_name_.empty()) {
+    set_name(fmt::format("XThread{:04X}", thread_->system_id()));
   }
 
   if (creation_params_.creation_flags & 0x60) {
     thread_->set_priority(creation_params_.creation_flags & 0x20 ? 1 : 0);
   }
+
+  // Assign the newly created thread to the logical processor, and also set up
+  // the current CPU in KPCR and KTHREAD.
+  SetActiveCpu(cpu_index);
 
   // Notify processor of our creation.
   emulator()->processor()->OnThreadCreated(handle(), thread_state_, this);
@@ -439,11 +463,12 @@ X_STATUS XThread::Exit(int exit_code) {
   emulator()->processor()->OnThreadExit(thread_id_);
 
   // NOTE: unless PlatformExit fails, expect it to never return!
-  current_thread_tls_ = nullptr;
+  current_xthread_tls_ = nullptr;
+  current_thread_ = nullptr;
   xe::Profiler::ThreadExit();
 
   running_ = false;
-  Release();
+  ReleaseHandle();
 
   // NOTE: this does not return!
   xe::threading::Thread::Exit(exit_code);
@@ -462,15 +487,30 @@ X_STATUS XThread::Terminate(int exit_code) {
   emulator()->processor()->OnThreadExit(thread_id_);
 
   running_ = false;
-  Release();
+  if (XThread::IsInThread(this)) {
+    ReleaseHandle();
+    xe::threading::Thread::Exit(exit_code);
+  } else {
+    thread_->Terminate(exit_code);
+    ReleaseHandle();
+  }
 
-  thread_->Terminate(exit_code);
   return X_STATUS_SUCCESS;
 }
 
+class reenter_exception {
+ public:
+  reenter_exception(uint32_t address) : address_(address){};
+  virtual ~reenter_exception(){};
+  uint32_t address() const { return address_; }
+
+ private:
+  uint32_t address_;
+};
+
 void XThread::Execute() {
-  XELOGKERNEL("XThread::Execute thid %d (handle=%.8X, '%s', native=%.8X)",
-              thread_id_, handle(), name_.c_str(), thread_->system_id());
+  XELOGKERNEL("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
+              thread_id_, handle(), thread_name_, thread_->system_id());
 
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);
@@ -480,31 +520,61 @@ void XThread::Execute() {
   // have time to initialize shared structures AFTER CreateThread (RR).
   xe::threading::Sleep(std::chrono::milliseconds(10));
 
-  int exit_code = 0;
-
   // Dispatch any APCs that were queued before the thread was created first.
   DeliverAPCs();
+
+  uint32_t address;
+  std::vector<uint64_t> args;
+  bool want_exit_code;
+  int exit_code = 0;
 
   // If a XapiThreadStartup value is present, we use that as a trampoline.
   // Otherwise, we are a raw thread.
   if (creation_params_.xapi_thread_startup) {
-    uint64_t args[] = {creation_params_.start_address,
-                       creation_params_.start_context};
-    kernel_state()->processor()->Execute(thread_state_,
-                                         creation_params_.xapi_thread_startup,
-                                         args, xe::countof(args));
+    address = creation_params_.xapi_thread_startup;
+    args.push_back(creation_params_.start_address);
+    args.push_back(creation_params_.start_context);
+    want_exit_code = false;
   } else {
     // Run user code.
-    uint64_t args[] = {creation_params_.start_context};
-    exit_code = static_cast<int>(kernel_state()->processor()->Execute(
-        thread_state_, creation_params_.start_address, args,
-        xe::countof(args)));
-    // If we got here it means the execute completed without an exit being
-    // called.
-    // Treat the return code as an implicit exit code.
+    address = creation_params_.start_address;
+    args.push_back(creation_params_.start_context);
+    want_exit_code = true;
   }
 
-  Exit(exit_code);
+  uint32_t next_address;
+  try {
+    exit_code = static_cast<int>(kernel_state()->processor()->Execute(
+        thread_state_, address, args.data(), args.size()));
+    next_address = 0;
+  } catch (const reenter_exception& ree) {
+    next_address = ree.address();
+  }
+
+  // See XThread::Reenter comments.
+  while (next_address != 0) {
+    try {
+      kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
+      next_address = 0;
+      if (want_exit_code) {
+        exit_code = static_cast<int>(thread_state_->context()->r[3]);
+      }
+    } catch (const reenter_exception& ree) {
+      next_address = ree.address();
+    }
+  }
+
+  // If we got here it means the execute completed without an exit being called.
+  // Treat the return code as an implicit exit code (if desired).
+  Exit(!want_exit_code ? 0 : exit_code);
+}
+
+void XThread::Reenter(uint32_t address) {
+  // TODO(gibbed): Maybe use setjmp/longjmp on Windows?
+  // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/longjmp#remarks
+  // On Windows with /EH, setjmp/longjmp do stack unwinding.
+  // Is there a better solution than exceptions for stack unwinding?
+  throw reenter_exception(address);
 }
 
 void XThread::EnterCriticalRegion() {
@@ -558,8 +628,8 @@ void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
 }
 
 void XThread::DeliverAPCs() {
-  // http://www.drdobbs.com/inside-nts-asynchronous-procedure-call/184416590?pgno=1
-  // http://www.drdobbs.com/inside-nts-asynchronous-procedure-call/184416590?pgno=7
+  // https://www.drdobbs.com/inside-nts-asynchronous-procedure-call/184416590?pgno=1
+  // https://www.drdobbs.com/inside-nts-asynchronous-procedure-call/184416590?pgno=7
   auto processor = kernel_state()->processor();
   LockApc();
   while (apc_list_.HasPending()) {
@@ -569,7 +639,7 @@ void XThread::DeliverAPCs() {
     auto apc = reinterpret_cast<XAPC*>(memory()->TranslateVirtual(apc_ptr));
     bool needs_freeing = apc->kernel_routine == XAPC::kDummyKernelRoutine;
 
-    XELOGD("Delivering APC to %.8X", uint32_t(apc->normal_routine));
+    XELOGD("Delivering APC to {:08X}", uint32_t(apc->normal_routine));
 
     // Mark as uninserted so that it can be reinserted again by the routine.
     apc->enqueued = 0;
@@ -612,7 +682,7 @@ void XThread::DeliverAPCs() {
       LockApc();
     }
 
-    XELOGD("Completed delivery of APC to %.8X (%.8X, %.8X, %.8X)",
+    XELOGD("Completed delivery of APC to {:08X} ({:08X}, {:08X}, {:08X})",
            normal_routine, normal_context, arg1, arg2);
 
     // If special, free it.
@@ -670,40 +740,41 @@ void XThread::SetPriority(int32_t increment) {
   } else {
     target_priority = xe::threading::ThreadPriority::kNormal;
   }
-  if (!FLAGS_ignore_thread_priorities) {
+  if (!cvars::ignore_thread_priorities) {
     thread_->set_priority(target_priority);
   }
 }
 
 void XThread::SetAffinity(uint32_t affinity) {
-  // Affinity mask, as in SetThreadAffinityMask.
-  // Xbox thread IDs:
-  // 0 - core 0, thread 0 - user
-  // 1 - core 0, thread 1 - user
-  // 2 - core 1, thread 0 - sometimes xcontent
-  // 3 - core 1, thread 1 - user
-  // 4 - core 2, thread 0 - xaudio
-  // 5 - core 2, thread 1 - user
-  // TODO(benvanik): implement better thread distribution.
-  // NOTE: these are logical processors, not physical processors or cores.
-  if (xe::threading::logical_processor_count() < 6) {
-    XELOGW("Too few processors - scheduling will be wonky");
-  }
   SetActiveCpu(GetFakeCpuNumber(affinity));
-  affinity_ = affinity;
-  if (!FLAGS_ignore_thread_affinities) {
-    thread_->set_affinity_mask(affinity);
+}
+
+uint8_t XThread::active_cpu() const {
+  const X_KPCR& pcr = *memory()->TranslateVirtual<const X_KPCR*>(pcr_address_);
+  return pcr.current_cpu;
+}
+
+void XThread::SetActiveCpu(uint8_t cpu_index) {
+  // May be called during thread creation - don't skip if current == new.
+
+  assert_true(cpu_index < 6);
+
+  X_KPCR& pcr = *memory()->TranslateVirtual<X_KPCR*>(pcr_address_);
+  pcr.current_cpu = cpu_index;
+
+  if (is_guest_thread()) {
+    X_KTHREAD& thread_object =
+        *memory()->TranslateVirtual<X_KTHREAD*>(guest_object());
+    thread_object.current_cpu = cpu_index;
   }
-}
 
-uint32_t XThread::active_cpu() const {
-  uint8_t* pcr = memory()->TranslateVirtual(pcr_address_);
-  return xe::load_and_swap<uint8_t>(pcr + 0x10C);
-}
-
-void XThread::SetActiveCpu(uint32_t cpu_index) {
-  uint8_t* pcr = memory()->TranslateVirtual(pcr_address_);
-  xe::store_and_swap<uint8_t>(pcr + 0x10C, cpu_index);
+  if (xe::threading::logical_processor_count() >= 6) {
+    if (!cvars::ignore_thread_affinities) {
+      thread_->set_affinity_mask(uint64_t(1) << cpu_index);
+    }
+  } else {
+    XELOGW("Too few processor cores - scheduling will be wonky");
+  }
 }
 
 bool XThread::GetTLSValue(uint32_t slot, uint32_t* value_out) {
@@ -794,10 +865,6 @@ struct ThreadSavedState {
   bool is_main_thread;  // Is this the main thread?
   bool is_running;
 
-  // Clock settings (invalid if not running)
-  uint64_t tick_count_;
-  uint64_t system_time_;
-
   uint32_t apc_head;
   uint32_t tls_static_address;
   uint32_t tls_dynamic_address;
@@ -831,13 +898,13 @@ bool XThread::Save(ByteStream* stream) {
     return false;
   }
 
-  XELOGD("XThread %.8X serializing...", handle());
+  XELOGD("XThread {:08X} serializing...", handle());
 
   uint32_t pc = 0;
   if (running_) {
     pc = emulator()->processor()->StepToGuestSafePoint(thread_id_);
     if (!pc) {
-      XELOGE("XThread %.8X failed to save: could not step to a safe point!",
+      XELOGE("XThread {:08X} failed to save: could not step to a safe point!",
              handle());
       assert_always();
       return false;
@@ -849,7 +916,7 @@ bool XThread::Save(ByteStream* stream) {
   }
 
   stream->Write('THRD');
-  stream->Write(name_);
+  stream->Write(thread_name_);
 
   ThreadSavedState state;
   state.thread_id = thread_id_;
@@ -866,10 +933,6 @@ bool XThread::Save(ByteStream* stream) {
   state.stack_alloc_size = stack_alloc_size_;
 
   if (running_) {
-    state.tick_count_ = Clock::QueryGuestTickCount();
-    state.system_time_ =
-        Clock::QueryGuestSystemTime() - Clock::guest_system_time_base();
-
     // Context information
     auto context = thread_state_->context();
     state.context.lr = context->lr;
@@ -913,9 +976,9 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
     return nullptr;
   }
 
-  XELOGD("XThread %.8X", thread->handle());
+  XELOGD("XThread {:08X}", thread->handle());
 
-  thread->name_ = stream->Read<std::string>();
+  thread->thread_name_ = stream->Read<std::string>();
 
   ThreadSavedState state;
   stream->Read(&state, sizeof(ThreadSavedState));
@@ -964,7 +1027,7 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
     context->vscr_sat = state.context.vscr_sat;
 
     // Always retain when starting - the thread owns itself until exited.
-    thread->Retain();
+    thread->RetainHandle();
 
     xe::threading::Thread::CreationParameters params;
     params.create_suspended = true;  // Not done restoring yet.
@@ -979,11 +1042,8 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       // Profiler needs to know about the thread.
       xe::Profiler::ThreadEnter(thread->name().c_str());
 
-      // Setup the time now that we're in the thread.
-      Clock::SetGuestTickCount(state.tick_count_);
-      Clock::SetGuestSystemTime(state.system_time_);
-
-      current_thread_tls_ = thread;
+      current_xthread_tls_ = thread;
+      current_thread_ = thread;
 
       // Acquire any mutants
       for (auto mutant : thread->pending_mutant_acquires_) {
@@ -999,12 +1059,13 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       uint32_t pc = state.context.pc;
       thread->kernel_state_->processor()->ExecuteRaw(thread->thread_state_, pc);
 
-      current_thread_tls_ = nullptr;
+      current_thread_ = nullptr;
+      current_xthread_tls_ = nullptr;
 
       xe::Profiler::ThreadExit();
 
       // Release the self-reference to the thread.
-      thread->Release();
+      thread->ReleaseHandle();
     });
 
     // Notify processor we were recreated.
@@ -1026,8 +1087,8 @@ XHostThread::XHostThread(KernelState* kernel_state, uint32_t stack_size,
 
 void XHostThread::Execute() {
   XELOGKERNEL(
-      "XThread::Execute thid %d (handle=%.8X, '%s', native=%.8X, <host>)",
-      thread_id_, handle(), name_.c_str(), thread_->system_id());
+      "XThread::Execute thid {} (handle={:08X}, '{}', native={:08X}, <host>)",
+      thread_id_, handle(), thread_name_, thread_->system_id());
 
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);

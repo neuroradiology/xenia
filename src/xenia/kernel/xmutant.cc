@@ -17,10 +17,10 @@
 namespace xe {
 namespace kernel {
 
-XMutant::XMutant() : XObject(kTypeMutant) {}
-
 XMutant::XMutant(KernelState* kernel_state)
-    : XObject(kernel_state, kTypeMutant) {}
+    : XObject(kernel_state, kObjectType) {}
+
+XMutant::XMutant() : XObject(kObjectType) {}
 
 XMutant::~XMutant() = default;
 
@@ -60,7 +60,7 @@ bool XMutant::Save(ByteStream* stream) {
 
   uint32_t owning_thread_handle = owning_thread_ ? owning_thread_->handle() : 0;
   stream->Write<uint32_t>(owning_thread_handle);
-  XELOGD("XMutant %.8X (owner: %.8X)", handle(), owning_thread_handle);
+  XELOGD("XMutant {:08X} (owner: {:08X})", handle(), owning_thread_handle);
 
   return true;
 }

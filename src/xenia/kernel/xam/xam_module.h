@@ -21,6 +21,8 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
+bool xeXamIsUIActive();
+
 class XamModule : public KernelModule {
  public:
   XamModule(Emulator* emulator, KernelState* kernel_state);
@@ -30,8 +32,7 @@ class XamModule : public KernelModule {
 
   struct LoaderData {
     bool launch_data_present = false;
-    uint32_t launch_data_ptr = 0;
-    uint32_t launch_data_size = 0;
+    std::vector<uint8_t> launch_data;
     uint32_t launch_flags = 0;
     std::string launch_path;  // Full path to next xex
   };

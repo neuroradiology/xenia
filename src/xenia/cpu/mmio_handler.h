@@ -10,8 +10,8 @@
 #ifndef XENIA_CPU_MMIO_HANDLER_H_
 #define XENIA_CPU_MMIO_HANDLER_H_
 
-#include <list>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "xenia/base/mutex.h"
@@ -29,9 +29,6 @@ typedef uint32_t (*MMIOReadCallback)(void* ppc_context, void* callback_context,
 typedef void (*MMIOWriteCallback)(void* ppc_context, void* callback_context,
                                   uint32_t addr, uint32_t value);
 
-typedef void (*WriteWatchCallback)(void* context_ptr, void* data_ptr,
-                                   uint32_t address);
-
 struct MMIORange {
   uint32_t address;
   uint32_t mask;
@@ -46,9 +43,21 @@ class MMIOHandler {
  public:
   virtual ~MMIOHandler();
 
-  static std::unique_ptr<MMIOHandler> Install(uint8_t* virtual_membase,
-                                              uint8_t* physical_membase,
-                                              uint8_t* membase_end);
+  typedef uint32_t (*HostToGuestVirtual)(const void* context,
+                                         const void* host_address);
+  typedef bool (*AccessViolationCallback)(
+      std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+      void* context, void* host_address, bool is_write);
+
+  // access_violation_callback is called with global_critical_region locked once
+  // on the thread, so if multiple threads trigger an access violation in the
+  // same page, the callback will be called only once.
+  static std::unique_ptr<MMIOHandler> Install(
+      uint8_t* virtual_membase, uint8_t* physical_membase, uint8_t* membase_end,
+      HostToGuestVirtual host_to_guest_virtual,
+      const void* host_to_guest_virtual_context,
+      AccessViolationCallback access_violation_callback,
+      void* access_violation_callback_context);
   static MMIOHandler* global_handler() { return global_handler_; }
 
   bool RegisterRange(uint32_t virtual_address, uint32_t mask, uint32_t size,
@@ -59,32 +68,15 @@ class MMIOHandler {
   bool CheckLoad(uint32_t virtual_address, uint32_t* out_value);
   bool CheckStore(uint32_t virtual_address, uint32_t value);
 
-  uintptr_t AddPhysicalWriteWatch(uint32_t guest_address, size_t length,
-                                  WriteWatchCallback callback,
-                                  void* callback_context, void* callback_data);
-  void CancelWriteWatch(uintptr_t watch_handle);
-  void InvalidateRange(uint32_t physical_address, size_t length);
-
  protected:
-  struct WriteWatchEntry {
-    uint32_t address;
-    uint32_t length;
-    WriteWatchCallback callback;
-    void* callback_context;
-    void* callback_data;
-  };
-
   MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase,
-              uint8_t* membase_end)
-      : virtual_membase_(virtual_membase),
-        physical_membase_(physical_membase),
-        memory_end_(membase_end) {}
+              uint8_t* membase_end, HostToGuestVirtual host_to_guest_virtual,
+              const void* host_to_guest_virtual_context,
+              AccessViolationCallback access_violation_callback,
+              void* access_violation_callback_context);
 
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
   bool ExceptionCallback(Exception* ex);
-
-  void ClearWriteWatch(WriteWatchEntry* entry);
-  bool CheckWriteWatch(uint64_t fault_address);
 
   uint8_t* virtual_membase_;
   uint8_t* physical_membase_;
@@ -92,11 +84,15 @@ class MMIOHandler {
 
   std::vector<MMIORange> mapped_ranges_;
 
-  xe::global_critical_region global_critical_region_;
-  // TODO(benvanik): data structure magic.
-  std::list<WriteWatchEntry*> write_watches_;
+  HostToGuestVirtual host_to_guest_virtual_;
+  const void* host_to_guest_virtual_context_;
+
+  AccessViolationCallback access_violation_callback_;
+  void* access_violation_callback_context_;
 
   static MMIOHandler* global_handler_;
+
+  xe::global_critical_region global_critical_region_;
 };
 
 }  // namespace cpu

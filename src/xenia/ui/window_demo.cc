@@ -2,12 +2,10 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
-
-#include <gflags/gflags.h>
 
 #include <cstring>
 
@@ -15,7 +13,6 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/main.h"
-#include "xenia/base/platform_win.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/ui/graphics_provider.h"
@@ -29,7 +26,7 @@ namespace ui {
 // Implemented in one of the window_*_demo.cc files under a subdir.
 std::unique_ptr<GraphicsProvider> CreateDemoGraphicsProvider(Window* window);
 
-int window_demo_main(const std::vector<std::wstring>& args) {
+int window_demo_main(const std::vector<std::string>& args) {
   Profiler::Initialize();
   Profiler::ThreadEnter("main");
 
@@ -47,20 +44,20 @@ int window_demo_main(const std::vector<std::wstring>& args) {
 
   // Main menu.
   auto main_menu = MenuItem::Create(MenuItem::Type::kNormal);
-  auto file_menu = MenuItem::Create(MenuItem::Type::kPopup, L"&File");
+  auto file_menu = MenuItem::Create(MenuItem::Type::kPopup, "&File");
   {
-    file_menu->AddChild(MenuItem::Create(MenuItem::Type::kString, L"&Close",
-                                         L"Alt+F4",
+    file_menu->AddChild(MenuItem::Create(MenuItem::Type::kString, "&Close",
+                                         "Alt+F4",
                                          [&window]() { window->Close(); }));
   }
   main_menu->AddChild(std::move(file_menu));
-  auto debug_menu = MenuItem::Create(MenuItem::Type::kPopup, L"&Debug");
+  auto debug_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Debug");
   {
     debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kString,
-                                          L"Toggle Profiler &Display", L"F3",
+                                          "Toggle Profiler &Display", "F3",
                                           []() { Profiler::ToggleDisplay(); }));
     debug_menu->AddChild(MenuItem::Create(MenuItem::Type::kString,
-                                          L"&Pause/Resume Profiler", L"`",
+                                          "&Pause/Resume Profiler", "`",
                                           []() { Profiler::TogglePause(); }));
   }
   main_menu->AddChild(std::move(debug_menu));
@@ -87,11 +84,10 @@ int window_demo_main(const std::vector<std::wstring>& args) {
   });
 
   window->on_closed.AddListener(
-      [&loop, &graphics_provider](xe::ui::UIEvent* e) {
+      [&loop, &window, &graphics_provider](xe::ui::UIEvent* e) {
         loop->Quit();
+        Profiler::Shutdown();
         XELOGI("User-initiated death!");
-        graphics_provider.reset();
-        exit(1);
       });
   loop->on_quit.AddListener([&window](xe::ui::UIEvent* e) { window.reset(); });
 
@@ -106,7 +102,7 @@ int window_demo_main(const std::vector<std::wstring>& args) {
   window->on_painting.AddListener([&](xe::ui::UIEvent* e) {
     auto& io = window->imgui_drawer()->GetIO();
 
-    ImGui::ShowTestWindow();
+    ImGui::ShowDemoWindow();
     ImGui::ShowMetricsWindow();
 
     // Continuous paint.
@@ -116,11 +112,9 @@ int window_demo_main(const std::vector<std::wstring>& args) {
   // Wait until we are exited.
   loop->AwaitQuit();
 
-  loop->PostSynchronous([&graphics_provider]() { graphics_provider.reset(); });
   window.reset();
   loop.reset();
-  Profiler::Dump();
-  Profiler::Shutdown();
+  graphics_provider.reset();
   return 0;
 }
 

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -10,6 +10,8 @@
 #ifndef XENIA_CPU_BACKEND_CODE_CACHE_H_
 #define XENIA_CPU_BACKEND_CODE_CACHE_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "xenia/cpu/function.h"
@@ -23,9 +25,9 @@ class CodeCache {
   CodeCache() = default;
   virtual ~CodeCache() = default;
 
-  virtual std::wstring file_name() const = 0;
-  virtual uint32_t base_address() const = 0;
-  virtual uint32_t total_size() const = 0;
+  virtual const std::filesystem::path& file_name() const = 0;
+  virtual uintptr_t execute_base_address() const = 0;
+  virtual size_t total_size() const = 0;
 
   // Finds a function based on the given host PC (that may be within a
   // function).

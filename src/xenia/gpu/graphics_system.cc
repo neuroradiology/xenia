@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -20,14 +20,20 @@
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/loop.h"
 
+DEFINE_bool(
+    store_shaders, true,
+    "Store shaders persistently and load them when loading games to avoid "
+    "runtime spikes and freezes when playing the game not for the first time.",
+    "GPU");
+
 namespace xe {
 namespace gpu {
 
 // Nvidia Optimus/AMD PowerXpress support.
 // These exports force the process to trigger the discrete GPU in multi-GPU
 // systems.
-// http://developer.download.nvidia.com/devzone/devcenter/gamegraphics/files/OptimusRenderingPolicies.pdf
-// http://stackoverflow.com/questions/17458803/amd-equivalent-to-nvoptimusenablement
+// https://developer.download.nvidia.com/devzone/devcenter/gamegraphics/files/OptimusRenderingPolicies.pdf
+// https://stackoverflow.com/questions/17458803/amd-equivalent-to-nvoptimusenablement
 #if XE_PLATFORM_WIN32
 extern "C" {
 __declspec(dllexport) uint32_t NvOptimusEnablement = 0x00000001;
@@ -49,23 +55,35 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
 
   // Initialize display and rendering context.
   // This must happen on the UI thread.
-  std::unique_ptr<xe::ui::GraphicsContext> processor_context;
-  target_window_->loop()->PostSynchronous([&]() {
-    // Create the context used for presentation.
-    assert_null(target_window->context());
-    target_window_->set_context(provider_->CreateContext(target_window_));
+  std::unique_ptr<xe::ui::GraphicsContext> processor_context = nullptr;
+  if (provider_) {
+    if (target_window_) {
+      target_window_->loop()->PostSynchronous([&]() {
+        // Create the context used for presentation.
+        assert_null(target_window->context());
+        target_window_->set_context(provider_->CreateContext(target_window_));
 
-    // Setup the GL context the command processor will do all its drawing in.
-    // It's shared with the display context so that we can resolve framebuffers
-    // from it.
-    processor_context = provider()->CreateOffscreenContext();
-  });
-  if (!processor_context) {
-    xe::FatalError(
-        "Unable to initialize GL context. Xenia requires OpenGL 4.5. Ensure "
-        "you have the latest drivers for your GPU and that it supports OpenGL "
-        "4.5. See http://xenia.jp/faq/ for more information.");
-    return X_STATUS_UNSUCCESSFUL;
+        // Setup the context the command processor will do all its drawing in.
+        // It's shared with the display context so that we can resolve
+        // framebuffers from it.
+        processor_context = provider()->CreateOffscreenContext();
+      });
+    } else {
+      processor_context = provider()->CreateOffscreenContext();
+    }
+
+    if (!processor_context) {
+      xe::FatalError(
+          "Unable to initialize graphics context. Xenia requires Vulkan "
+          "support.\n"
+          "\n"
+          "Ensure you have the latest drivers for your GPU and "
+          "that it supports Vulkan.\n"
+          "\n"
+          "See https://xenia.jp/faq/ for more information and a list of "
+          "supported GPUs.");
+      return X_STATUS_UNSUCCESSFUL;
+    }
   }
 
   // Create command processor. This will spin up a thread to process all
@@ -75,12 +93,21 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
     XELOGE("Unable to initialize command processor");
     return X_STATUS_UNSUCCESSFUL;
   }
-  command_processor_->set_swap_request_handler(
-      [this]() { target_window_->Invalidate(); });
 
-  // Watch for paint requests to do our swap.
-  target_window->on_painting.AddListener(
-      [this](xe::ui::UIEvent* e) { Swap(e); });
+  if (target_window) {
+    command_processor_->set_swap_request_handler(
+        [this]() { target_window_->Invalidate(); });
+
+    // Watch for paint requests to do our swap.
+    target_window->on_painting.AddListener(
+        [this](xe::ui::UIEvent* e) { Swap(e); });
+
+    // Watch for context lost events.
+    target_window->on_context_lost.AddListener(
+        [this](xe::ui::UIEvent* e) { Reset(); });
+  } else {
+    command_processor_->set_swap_request_handler([]() {});
+  }
 
   // Let the processor know we want register access callbacks.
   memory_->AddVirtualMappedRange(
@@ -92,7 +119,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   vsync_worker_running_ = true;
   vsync_worker_thread_ = kernel::object_ref<kernel::XHostThread>(
       new kernel::XHostThread(kernel_state_, 128 * 1024, 0, [this]() {
-        uint64_t vsync_duration = FLAGS_vsync ? 16 : 1;
+        uint64_t vsync_duration = cvars::vsync ? 16 : 1;
         uint64_t last_frame_time = Clock::QueryGuestTickCount();
         while (vsync_worker_running_) {
           uint64_t current_time = Clock::QueryGuestTickCount();
@@ -108,10 +135,10 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
       }));
   // As we run vblank interrupts the debugger must be able to suspend us.
   vsync_worker_thread_->set_can_debugger_suspend(true);
-  vsync_worker_thread_->set_name("GraphicsSystem Vsync");
+  vsync_worker_thread_->set_name("GPU VSync");
   vsync_worker_thread_->Create();
 
-  if (FLAGS_trace_gpu_stream) {
+  if (cvars::trace_gpu_stream) {
     BeginTracing();
   }
 
@@ -119,17 +146,24 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
 }
 
 void GraphicsSystem::Shutdown() {
-  EndTracing();
+  if (command_processor_) {
+    EndTracing();
+    command_processor_->Shutdown();
+  }
 
-  vsync_worker_running_ = false;
-  vsync_worker_thread_->Wait(0, 0, 0, nullptr);
-  vsync_worker_thread_.reset();
+  if (vsync_worker_thread_) {
+    vsync_worker_running_ = false;
+    vsync_worker_thread_->Wait(0, 0, 0, nullptr);
+    vsync_worker_thread_.reset();
+  }
+}
 
-  command_processor_->Shutdown();
+void GraphicsSystem::Reset() {
+  // TODO(DrChat): Reset the system.
+  XELOGI("Context lost; Reset invoked");
+  Shutdown();
 
-  // TODO(benvanik): remove mapped range.
-
-  command_processor_.reset();
+  xe::FatalError("Graphics device lost (probably due to an internal error)");
 }
 
 uint32_t GraphicsSystem::ReadRegisterThunk(void* ppc_context,
@@ -143,19 +177,25 @@ void GraphicsSystem::WriteRegisterThunk(void* ppc_context, GraphicsSystem* gs,
 }
 
 uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
-  uint32_t r = addr & 0xFFFF;
+  uint32_t r = (addr & 0xFFFF) / 4;
 
   switch (r) {
-    case 0x3C00:  // ?
+    case 0x0F00:  // RB_EDRAM_TIMING
       return 0x08100748;
-    case 0x3C04:  // ?
+    case 0x0F01:  // RB_BC_CONTROL
       return 0x0000200E;
-    case 0x6530:  // Scanline?
+    case 0x194C:  // R500_D1MODE_V_COUNTER
       return 0x000002D0;
-    case 0x6544:  // ? vblank pending?
-      return 1;
-    case 0x6584:  // Screen res - 1280x720
+    case 0x1951:  // interrupt status
+      return 1;   // vblank
+    case 0x1961:  // AVIVO_D1MODE_VIEWPORT_SIZE
+                  // Screen res - 1280x720
+                  // maximum [width(0x0FFF), height(0x0FFF)]
       return 0x050002D0;
+    default:
+      if (!register_file_.GetRegisterInfo(r)) {
+        XELOGE("GPU: Read from unknown register ({:04X})", r);
+      }
   }
 
   assert_true(r < RegisterFile::kRegisterCount);
@@ -163,17 +203,16 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
 }
 
 void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
-  uint32_t r = addr & 0xFFFF;
+  uint32_t r = (addr & 0xFFFF) / 4;
 
   switch (r) {
-    case 0x0714:  // CP_RB_WPTR
+    case 0x01C5:  // CP_RB_WPTR
       command_processor_->UpdateWritePointer(value);
       break;
-    case 0x6110:  // ? swap related?
-      XELOGW("Unimplemented GPU register %.4X write: %.8X", r, value);
-      return;
+    case 0x1844:  // AVIVO_D1GRPH_PRIMARY_SURFACE_ADDRESS
+      break;
     default:
-      XELOGW("Unknown GPU register %.4X write: %.8X", r, value);
+      XELOGW("Unknown GPU register {:04X} write: {:08X}", r, value);
       break;
   }
 
@@ -181,8 +220,8 @@ void GraphicsSystem::WriteRegister(uint32_t addr, uint32_t value) {
   register_file_.values[r].u32 = value;
 }
 
-void GraphicsSystem::InitializeRingBuffer(uint32_t ptr, uint32_t page_count) {
-  command_processor_->InitializeRingBuffer(ptr, page_count);
+void GraphicsSystem::InitializeRingBuffer(uint32_t ptr, uint32_t log2_size) {
+  command_processor_->InitializeRingBuffer(ptr, log2_size + 0x3);
 }
 
 void GraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr,
@@ -194,7 +233,7 @@ void GraphicsSystem::SetInterruptCallback(uint32_t callback,
                                           uint32_t user_data) {
   interrupt_callback_ = callback;
   interrupt_callback_data_ = user_data;
-  XELOGGPU("SetInterruptCallback(%.4X, %.4X)", callback, user_data);
+  XELOGGPU("SetInterruptCallback({:08X}, {:08X})", callback, user_data);
 }
 
 void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
@@ -211,7 +250,7 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   }
   thread->SetActiveCpu(cpu);
 
-  // XELOGGPU("Dispatching GPU interrupt at %.8X w/ mode %d on cpu %d",
+  // XELOGGPU("Dispatching GPU interrupt at {:08X} w/ mode {} on cpu {}",
   //          interrupt_callback_, source, cpu);
 
   uint64_t args[] = {source, interrupt_callback_data_};
@@ -236,12 +275,37 @@ void GraphicsSystem::ClearCaches() {
       [&]() { command_processor_->ClearCaches(); });
 }
 
+void GraphicsSystem::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) {
+  if (!cvars::store_shaders) {
+    return;
+  }
+  if (blocking) {
+    if (command_processor_->is_paused()) {
+      // Safe to run on any thread while the command processor is paused, no
+      // race condition.
+      command_processor_->InitializeShaderStorage(cache_root, title_id, true);
+    } else {
+      xe::threading::Fence fence;
+      command_processor_->CallInThread([this, cache_root, title_id, &fence]() {
+        command_processor_->InitializeShaderStorage(cache_root, title_id, true);
+        fence.Signal();
+      });
+      fence.Wait();
+    }
+  } else {
+    command_processor_->CallInThread([this, cache_root, title_id]() {
+      command_processor_->InitializeShaderStorage(cache_root, title_id, false);
+    });
+  }
+}
+
 void GraphicsSystem::RequestFrameTrace() {
-  command_processor_->RequestFrameTrace(xe::to_wstring(FLAGS_trace_gpu_prefix));
+  command_processor_->RequestFrameTrace(cvars::trace_gpu_prefix);
 }
 
 void GraphicsSystem::BeginTracing() {
-  command_processor_->BeginTracing(xe::to_wstring(FLAGS_trace_gpu_prefix));
+  command_processor_->BeginTracing(cvars::trace_gpu_prefix);
 }
 
 void GraphicsSystem::EndTracing() { command_processor_->EndTracing(); }

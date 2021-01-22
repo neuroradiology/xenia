@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2015 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -12,7 +12,7 @@
 #include <cinttypes>
 
 #include "third_party/snappy/snappy.h"
-
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/base/math.h"
@@ -23,7 +23,7 @@
 namespace xe {
 namespace gpu {
 
-bool TraceReader::Open(const std::wstring& path) {
+bool TraceReader::Open(const std::filesystem::path& path) {
   Close();
 
   mmap_ = MappedMemory::Open(path, MappedMemory::Mode::kRead);
@@ -37,7 +37,7 @@ bool TraceReader::Open(const std::wstring& path) {
   // Verify version.
   auto header = reinterpret_cast<const TraceHeader*>(trace_data_);
   if (header->version != kTraceFormatVersion) {
-    XELOGE("Trace format version mismatch, code has %u, file has %u",
+    XELOGE("Trace format version mismatch, code has {}, file has {}",
            kTraceFormatVersion, header->version);
     if (header->version < kTraceFormatVersion) {
       XELOGE("You need to regenerate your trace for the latest version");
@@ -45,13 +45,12 @@ bool TraceReader::Open(const std::wstring& path) {
     return false;
   }
 
-  auto path_str = xe::to_string(path);
-  XELOGI("Mapped %" PRId64 "b trace from %s", trace_size_, path_str.c_str());
-  XELOGI("   Version: %u", header->version);
+  XELOGI("Mapped {}b trace from {}", trace_size_, xe::path_to_utf8(path));
+  XELOGI("   Version: {}", header->version);
   auto commit_str = std::string(header->build_commit_sha,
                                 xe::countof(header->build_commit_sha));
-  XELOGI("    Commit: %s", commit_str.c_str());
-  XELOGI("  Title ID: %u", header->title_id);
+  XELOGI("    Commit: {}", commit_str);
+  XELOGI("  Title ID: {}", header->title_id);
 
   ParseTrace();
 
@@ -75,6 +74,10 @@ void TraceReader::ParseTrace() {
   const uint8_t* packet_start_ptr = nullptr;
   const uint8_t* last_ptr = trace_ptr;
   bool pending_break = false;
+  auto current_command_buffer = new CommandBuffer();
+  current_frame.command_tree =
+      std::unique_ptr<CommandBuffer>(current_command_buffer);
+
   while (trace_ptr < trace_data_ + trace_size_) {
     ++current_frame.command_count;
     auto type = static_cast<TraceCommandType>(xe::load<uint32_t>(trace_ptr));
@@ -94,11 +97,29 @@ void TraceReader::ParseTrace() {
         auto cmd =
             reinterpret_cast<const IndirectBufferStartCommand*>(trace_ptr);
         trace_ptr += sizeof(*cmd) + cmd->count * 4;
+
+        // Traverse down a level.
+        auto sub_command_buffer = new CommandBuffer();
+        sub_command_buffer->parent = current_command_buffer;
+        current_command_buffer->commands.push_back(
+            CommandBuffer::Command(sub_command_buffer));
+        current_command_buffer = sub_command_buffer;
         break;
       }
       case TraceCommandType::kIndirectBufferEnd: {
         auto cmd = reinterpret_cast<const IndirectBufferEndCommand*>(trace_ptr);
         trace_ptr += sizeof(*cmd);
+
+        // IB packet is wrapped in a kPacketStart/kPacketEnd. Skip the end.
+        auto end_cmd = reinterpret_cast<const PacketEndCommand*>(trace_ptr);
+        assert_true(end_cmd->type == TraceCommandType::kPacketEnd);
+        trace_ptr += sizeof(*cmd);
+
+        // Go back up a level. If parent is null, this frame started in an
+        // indirect buffer.
+        if (current_command_buffer->parent) {
+          current_command_buffer = current_command_buffer->parent;
+        }
         break;
       }
       case TraceCommandType::kPacketStart: {
@@ -125,9 +146,21 @@ void TraceReader::ParseTrace() {
             command.end_ptr = trace_ptr;
             current_frame.commands.push_back(std::move(command));
             last_ptr = trace_ptr;
+            current_command_buffer->commands.push_back(CommandBuffer::Command(
+                uint32_t(current_frame.commands.size() - 1)));
             break;
           }
-          case PacketCategory::kSwap:
+          case PacketCategory::kSwap: {
+            Frame::Command command;
+            command.type = Frame::Command::Type::kSwap;
+            command.head_ptr = packet_start_ptr;
+            command.start_ptr = last_ptr;
+            command.end_ptr = trace_ptr;
+            current_frame.commands.push_back(std::move(command));
+            last_ptr = trace_ptr;
+            current_command_buffer->commands.push_back(CommandBuffer::Command(
+                uint32_t(current_frame.commands.size() - 1)));
+          } break;
           case PacketCategory::kGeneric: {
             // Ignored.
             break;
@@ -136,6 +169,9 @@ void TraceReader::ParseTrace() {
         if (pending_break) {
           current_frame.end_ptr = trace_ptr;
           frames_.push_back(std::move(current_frame));
+          current_command_buffer = new CommandBuffer();
+          current_frame.command_tree =
+              std::unique_ptr<CommandBuffer>(current_command_buffer);
           current_frame.start_ptr = trace_ptr;
           current_frame.end_ptr = nullptr;
           current_frame.command_count = 0;
@@ -150,6 +186,11 @@ void TraceReader::ParseTrace() {
       }
       case TraceCommandType::kMemoryWrite: {
         auto cmd = reinterpret_cast<const MemoryCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd) + cmd->encoded_length;
+        break;
+      }
+      case TraceCommandType::kEdramSnapshot: {
+        auto cmd = reinterpret_cast<const EdramSnapshotCommand*>(trace_ptr);
         trace_ptr += sizeof(*cmd) + cmd->encoded_length;
         break;
       }

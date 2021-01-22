@@ -7,11 +7,9 @@ project("xenia-core")
   kind("StaticLib")
   language("C++")
   links({
+    "fmt",
     "xenia-base",
   })
   defines({
-  })
-  includedirs({
-    project_root.."/third_party/gflags/src",
   })
   files({"*.h", "*.cc"})

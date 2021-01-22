@@ -2,30 +2,33 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/kernel/xfile.h"
+#include "xenia/vfs/virtual_file_system.h"
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/mutex.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xevent.h"
+#include "xenia/memory.h"
 
 namespace xe {
 namespace kernel {
 
 XFile::XFile(KernelState* kernel_state, vfs::File* file, bool synchronous)
-    : XObject(kernel_state, kTypeFile),
+    : XObject(kernel_state, kObjectType),
       file_(file),
       is_synchronous_(synchronous) {
   async_event_ = threading::Event::CreateAutoResetEvent(false);
 }
 
-XFile::XFile() : XObject(kTypeFile) {
+XFile::XFile() : XObject(kObjectType) {
   async_event_ = threading::Event::CreateAutoResetEvent(false);
 }
 
@@ -36,15 +39,15 @@ XFile::~XFile() {
 }
 
 X_STATUS XFile::QueryDirectory(X_FILE_DIRECTORY_INFORMATION* out_info,
-                               size_t length, const char* file_name,
+                               size_t length, const std::string_view file_name,
                                bool restart) {
   assert_not_null(out_info);
 
   vfs::Entry* entry = nullptr;
 
-  if (file_name != nullptr) {
+  if (!file_name.empty()) {
     // Only queries in the current directory are supported for now.
-    assert_true(std::strchr(file_name, '\\') == nullptr);
+    assert_true(utf8::find_any_of(file_name, "\\") == std::string_view::npos);
 
     find_engine_.SetRule(file_name);
 
@@ -61,7 +64,7 @@ X_STATUS XFile::QueryDirectory(X_FILE_DIRECTORY_INFORMATION* out_info,
 
     entry = file_->entry()->IterateChildren(find_engine_, &find_index_);
     if (!entry) {
-      return X_STATUS_NO_SUCH_FILE;
+      return X_STATUS_NO_MORE_FILES;
     }
   }
 
@@ -88,46 +91,161 @@ X_STATUS XFile::QueryDirectory(X_FILE_DIRECTORY_INFORMATION* out_info,
   return X_STATUS_SUCCESS;
 }
 
-X_STATUS XFile::Read(void* buffer, size_t buffer_length, size_t byte_offset,
-                     size_t* out_bytes_read, uint32_t apc_context) {
-  if (byte_offset == -1) {
+X_STATUS XFile::Read(uint32_t buffer_guest_address, uint32_t buffer_length,
+                     uint64_t byte_offset, uint32_t* out_bytes_read,
+                     uint32_t apc_context, bool notify_completion) {
+  if (byte_offset == uint64_t(-1)) {
     // Read from current position.
     byte_offset = position_;
   }
 
   size_t bytes_read = 0;
-  X_STATUS result =
-      file_->ReadSync(buffer, buffer_length, byte_offset, &bytes_read);
-  if (XSUCCEEDED(result)) {
-    position_ += bytes_read;
+  X_STATUS result = X_STATUS_SUCCESS;
+  // Zero length means success for a valid file object according to Windows
+  // tests.
+  if (buffer_length) {
+    if (UINT32_MAX - buffer_guest_address < buffer_length) {
+      result = X_STATUS_ACCESS_VIOLATION;
+    } else {
+      // Games often read directly to texture/vertex buffer memory - in this
+      // case, invalidation notifications must be sent. However, having any
+      // memory callbacks in the range will result in STATUS_ACCESS_VIOLATION at
+      // least on Windows, without anything being read or any callbacks being
+      // triggered. So for physical memory, host protection must be bypassed,
+      // and invalidation callbacks must be triggered manually (it's also wrong
+      // to trigger invalidation callbacks before reading in this case, because
+      // during the read, the guest may still access the data around the buffer
+      // that is located in the same host pages as the buffer's start and end,
+      // on the GPU - and that must not trigger a race condition).
+      uint32_t buffer_guest_high_address =
+          buffer_guest_address + buffer_length - 1;
+      xe::BaseHeap* buffer_start_heap =
+          memory()->LookupHeap(buffer_guest_address);
+      const xe::BaseHeap* buffer_end_heap =
+          memory()->LookupHeap(buffer_guest_high_address);
+      if (!buffer_start_heap || !buffer_end_heap ||
+          (buffer_start_heap->heap_type() == HeapType::kGuestPhysical) !=
+              (buffer_end_heap->heap_type() == HeapType::kGuestPhysical) ||
+          (buffer_start_heap->heap_type() == HeapType::kGuestPhysical &&
+           buffer_start_heap != buffer_end_heap)) {
+        result = X_STATUS_ACCESS_VIOLATION;
+      } else {
+        xe::PhysicalHeap* buffer_physical_heap =
+            buffer_start_heap->heap_type() == HeapType::kGuestPhysical
+                ? static_cast<xe::PhysicalHeap*>(buffer_start_heap)
+                : nullptr;
+        if (buffer_physical_heap &&
+            buffer_physical_heap->QueryRangeAccess(buffer_guest_address,
+                                                   buffer_guest_high_address) !=
+                memory::PageAccess::kReadWrite) {
+          result = X_STATUS_ACCESS_VIOLATION;
+        } else {
+          result = file_->ReadSync(
+              buffer_physical_heap
+                  ? memory()->TranslatePhysical(
+                        buffer_physical_heap->GetPhysicalAddress(
+                            buffer_guest_address))
+                  : memory()->TranslateVirtual(buffer_guest_address),
+              buffer_length, size_t(byte_offset), &bytes_read);
+          if (XSUCCEEDED(result)) {
+            if (buffer_physical_heap) {
+              buffer_physical_heap->TriggerCallbacks(
+                  xe::global_critical_region::AcquireDirect(),
+                  buffer_guest_address, buffer_length, true, true);
+            }
+            position_ += bytes_read;
+          }
+        }
+      }
+    }
+  }
+
+  if (out_bytes_read) {
+    *out_bytes_read = uint32_t(bytes_read);
+  }
+
+  if (notify_completion) {
+    XIOCompletion::IONotification notify;
+    notify.apc_context = apc_context;
+    notify.num_bytes = uint32_t(bytes_read);
+    notify.status = result;
+
+    NotifyIOCompletionPorts(notify);
+
+    async_event_->Set();
+  }
+
+  return result;
+}
+
+X_STATUS XFile::ReadScatter(uint32_t segments_guest_address, uint32_t length,
+                            uint64_t byte_offset, uint32_t* out_bytes_read,
+                            uint32_t apc_context) {
+  X_STATUS result = X_STATUS_SUCCESS;
+
+  // segments points to an array of buffer pointers of type
+  // "FILE_SEGMENT_ELEMENT", but they can just be treated as normal pointers
+  xe::be<uint32_t>* segments = reinterpret_cast<xe::be<uint32_t>*>(
+      memory()->TranslateVirtual(segments_guest_address));
+
+  // TODO: not sure if this is meant to change depending on buffer address?
+  // (only game seen using this always seems to use 4096-byte buffers)
+  uint32_t page_size = 4096;
+
+  uint32_t read_total = 0;
+  uint32_t read_remain = length;
+  while (read_remain) {
+    uint32_t read_length = read_remain;
+    uint32_t read_buffer = *segments;
+    if (read_length > page_size) {
+      read_length = page_size;
+      segments++;
+    }
+
+    uint32_t bytes_read = 0;
+    result = Read(read_buffer, read_length,
+                  byte_offset ? ((byte_offset != -1 && byte_offset != -2)
+                                     ? byte_offset + read_total
+                                     : byte_offset)
+                              : -1,
+                  &bytes_read, apc_context, false);
+
+    if (result != X_STATUS_SUCCESS) {
+      break;
+    }
+
+    read_total += bytes_read;
+    read_remain -= read_length;
+  }
+
+  if (out_bytes_read) {
+    *out_bytes_read = uint32_t(read_total);
   }
 
   XIOCompletion::IONotification notify;
   notify.apc_context = apc_context;
-  notify.num_bytes = uint32_t(bytes_read);
+  notify.num_bytes = uint32_t(read_total);
   notify.status = result;
 
   NotifyIOCompletionPorts(notify);
 
-  if (out_bytes_read) {
-    *out_bytes_read = bytes_read;
-  }
-
   async_event_->Set();
+
   return result;
 }
 
-X_STATUS XFile::Write(const void* buffer, size_t buffer_length,
-                      size_t byte_offset, size_t* out_bytes_written,
+X_STATUS XFile::Write(uint32_t buffer_guest_address, uint32_t buffer_length,
+                      uint64_t byte_offset, uint32_t* out_bytes_written,
                       uint32_t apc_context) {
-  if (byte_offset == -1) {
+  if (byte_offset == uint64_t(-1)) {
     // Write from current position.
     byte_offset = position_;
   }
 
   size_t bytes_written = 0;
   X_STATUS result =
-      file_->WriteSync(buffer, buffer_length, byte_offset, &bytes_written);
+      file_->WriteSync(memory()->TranslateVirtual(buffer_guest_address),
+                       buffer_length, size_t(byte_offset), &bytes_written);
   if (XSUCCEEDED(result)) {
     position_ += bytes_written;
   }
@@ -140,12 +258,14 @@ X_STATUS XFile::Write(const void* buffer, size_t buffer_length,
   NotifyIOCompletionPorts(notify);
 
   if (out_bytes_written) {
-    *out_bytes_written = bytes_written;
+    *out_bytes_written = uint32_t(bytes_written);
   }
 
   async_event_->Set();
   return result;
 }
+
+X_STATUS XFile::SetLength(size_t length) { return file_->SetLength(length); }
 
 void XFile::RegisterIOCompletionPort(uint32_t key,
                                      object_ref<XIOCompletion> port) {
@@ -167,7 +287,8 @@ void XFile::RemoveIOCompletionPort(uint32_t key) {
 }
 
 bool XFile::Save(ByteStream* stream) {
-  XELOGD("XFile %.8X (%s)", handle(), file_->entry()->absolute_path().c_str());
+  XELOGD("XFile {:08X} ({})", handle(),
+         file_->entry()->absolute_path().c_str());
 
   if (!SaveObject(stream)) {
     return false;
@@ -176,6 +297,8 @@ bool XFile::Save(ByteStream* stream) {
   stream->Write(file_->entry()->absolute_path());
   stream->Write<uint64_t>(position_);
   stream->Write(file_access());
+  stream->Write<bool>(
+      (file_->entry()->attributes() & vfs::kFileAttributeDirectory) != 0);
   stream->Write<bool>(is_synchronous_);
 
   return true;
@@ -193,16 +316,18 @@ object_ref<XFile> XFile::Restore(KernelState* kernel_state,
   auto abs_path = stream->Read<std::string>();
   uint64_t position = stream->Read<uint64_t>();
   auto access = stream->Read<uint32_t>();
+  auto is_directory = stream->Read<bool>();
   auto is_synchronous = stream->Read<bool>();
 
-  XELOGD("XFile %.8X (%s)", file->handle(), abs_path.c_str());
+  XELOGD("XFile {:08X} ({})", file->handle(), abs_path);
 
   vfs::File* vfs_file = nullptr;
   vfs::FileAction action;
   auto res = kernel_state->file_system()->OpenFile(
-      abs_path, vfs::FileDisposition::kOpen, access, &vfs_file, &action);
+      nullptr, abs_path, vfs::FileDisposition::kOpen, access, is_directory,
+      false, &vfs_file, &action);
   if (XFAILED(res)) {
-    XELOGE("Failed to open XFile: error %.8X", res);
+    XELOGE("Failed to open XFile: error {:08X}", res);
     return object_ref<XFile>(file);
   }
 

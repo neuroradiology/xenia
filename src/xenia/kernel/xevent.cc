@@ -15,7 +15,8 @@
 namespace xe {
 namespace kernel {
 
-XEvent::XEvent(KernelState* kernel_state) : XObject(kernel_state, kTypeEvent) {}
+XEvent::XEvent(KernelState* kernel_state)
+    : XObject(kernel_state, kObjectType) {}
 
 XEvent::~XEvent() = default;
 
@@ -72,7 +73,7 @@ int32_t XEvent::Reset() {
 void XEvent::Clear() { event_->Reset(); }
 
 bool XEvent::Save(ByteStream* stream) {
-  XELOGD("XEvent %.8X (%s)", handle(), manual_reset_ ? "manual" : "auto");
+  XELOGD("XEvent {:08X} ({})", handle(), manual_reset_ ? "manual" : "auto");
   SaveObject(stream);
 
   bool signaled = true;

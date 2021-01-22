@@ -2,37 +2,31 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/kernel/kernel_state.h"
 
-#include <gflags/gflags.h>
-
 #include <string>
 
+#include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
-#include "xenia/kernel/notify_listener.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xmodule.h"
+#include "xenia/kernel/xnotifylistener.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
-
-DEFINE_bool(headless, false,
-            "Don't display any UI, using defaults for prompts as needed.");
-DEFINE_string(content_root, "content",
-              "Root path for content (save/etc) storage.");
 
 namespace xe {
 namespace kernel {
@@ -57,27 +51,12 @@ KernelState::KernelState(Emulator* emulator)
   app_manager_ = std::make_unique<xam::AppManager>();
   user_profile_ = std::make_unique<xam::UserProfile>();
 
-  auto content_root = xe::to_wstring(FLAGS_content_root);
-  content_root = xe::to_absolute_path(content_root);
+  auto content_root = emulator_->content_root();
+  content_root = std::filesystem::absolute(content_root);
   content_manager_ = std::make_unique<xam::ContentManager>(this, content_root);
 
   assert_null(shared_kernel_state_);
   shared_kernel_state_ = this;
-
-  process_info_block_address_ = memory_->SystemHeapAlloc(0x60);
-
-  auto pib =
-      memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
-  // TODO(benvanik): figure out what this list is.
-  pib->unk_04 = pib->unk_08 = 0;
-  pib->unk_0C = 0x0000007F;
-  pib->unk_10 = 0x001F0000;
-  pib->thread_count = 0;
-  pib->unk_1B = 0x06;
-  pib->kernel_stack_size = 16 * 1024;
-  pib->process_type = process_type_;
-  // TODO(benvanik): figure out what this list is.
-  pib->unk_54 = pib->unk_58 = 0;
 
   // Hardcoded maximum of 2048 TLS slots.
   tls_bitmap_.Resize(2048);
@@ -103,10 +82,6 @@ KernelState::~KernelState() {
 
   // Shutdown apps.
   app_manager_.reset();
-
-  if (process_info_block_address_) {
-    memory_->SystemHeapFree(process_info_block_address_);
-  }
 
   assert_true(shared_kernel_state_ == this);
   shared_kernel_state_ = nullptr;
@@ -191,8 +166,8 @@ void KernelState::UnregisterUserModule(UserModule* module) {
   }
 }
 
-bool KernelState::IsKernelModule(const char* name) {
-  if (!name) {
+bool KernelState::IsKernelModule(const std::string_view name) {
+  if (name.empty()) {
     // Executing module isn't a kernel module.
     return false;
   }
@@ -205,7 +180,8 @@ bool KernelState::IsKernelModule(const char* name) {
   return false;
 }
 
-object_ref<KernelModule> KernelState::GetKernelModule(const char* name) {
+object_ref<KernelModule> KernelState::GetKernelModule(
+    const std::string_view name) {
   assert_true(IsKernelModule(name));
 
   for (auto kernel_module : kernel_modules_) {
@@ -217,12 +193,13 @@ object_ref<KernelModule> KernelState::GetKernelModule(const char* name) {
   return nullptr;
 }
 
-object_ref<XModule> KernelState::GetModule(const char* name, bool user_only) {
-  if (!name) {
+object_ref<XModule> KernelState::GetModule(const std::string_view name,
+                                           bool user_only) {
+  if (name.empty()) {
     // NULL name = self.
     // TODO(benvanik): lookup module from caller address.
     return GetExecutableModule();
-  } else if (strcasecmp(name, "kernel32.dll") == 0) {
+  } else if (xe::utf8::equal_case(name, "kernel32.dll")) {
     // Some games request this, for some reason. wtf.
     return nullptr;
   }
@@ -237,7 +214,7 @@ object_ref<XModule> KernelState::GetModule(const char* name, bool user_only) {
     }
   }
 
-  std::string path(name);
+  auto path(name);
 
   // Resolve the path to an absolute path.
   auto entry = file_system_->ResolvePath(name);
@@ -251,6 +228,40 @@ object_ref<XModule> KernelState::GetModule(const char* name, bool user_only) {
     }
   }
   return nullptr;
+}
+
+object_ref<XThread> KernelState::LaunchModule(object_ref<UserModule> module) {
+  if (!module->is_executable()) {
+    return nullptr;
+  }
+
+  SetExecutableModule(module);
+  XELOGI("KernelState: Launching module...");
+
+  // Create a thread to run in.
+  // We start suspended so we can run the debugger prep.
+  auto thread = object_ref<XThread>(
+      new XThread(kernel_state(), module->stack_size(), 0,
+                  module->entry_point(), 0, X_CREATE_SUSPENDED, true, true));
+
+  // We know this is the 'main thread'.
+  thread->set_name("Main XThread");
+
+  X_STATUS result = thread->Create();
+  if (XFAILED(result)) {
+    XELOGE("Could not create launch thread: {:08X}", result);
+    return nullptr;
+  }
+
+  // Waits for a debugger client, if desired.
+  emulator()->processor()->PreLaunch();
+
+  // Resume the thread now.
+  // If the debugger has requested a suspend this will just decrement the
+  // suspend count without resuming it until the debugger wants.
+  thread->Resume();
+
+  return thread;
 }
 
 object_ref<UserModule> KernelState::GetExecutableModule() {
@@ -268,6 +279,22 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
   if (!executable_module_) {
     return;
   }
+
+  assert_zero(process_info_block_address_);
+  process_info_block_address_ = memory_->SystemHeapAlloc(0x60);
+
+  auto pib =
+      memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
+  // TODO(benvanik): figure out what this list is.
+  pib->unk_04 = pib->unk_08 = 0;
+  pib->unk_0C = 0x0000007F;
+  pib->unk_10 = 0x001F0000;
+  pib->thread_count = 0;
+  pib->unk_1B = 0x06;
+  pib->kernel_stack_size = 16 * 1024;
+  pib->process_type = process_type_;
+  // TODO(benvanik): figure out what this list is.
+  pib->unk_54 = pib->unk_58 = 0;
 
   xex2_opt_tls_info* tls_header = nullptr;
   executable_module_->GetOptHeader(XEX_HEADER_TLS_INFO, &tls_header);
@@ -296,23 +323,28 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
     dispatch_thread_running_ = true;
     dispatch_thread_ =
         object_ref<XHostThread>(new XHostThread(this, 128 * 1024, 0, [this]() {
+          // As we run guest callbacks the debugger must be able to suspend us.
+          dispatch_thread_->set_can_debugger_suspend(true);
+
+          auto global_lock = global_critical_region_.AcquireDeferred();
           while (dispatch_thread_running_) {
-            auto global_lock = global_critical_region_.Acquire();
+            global_lock.lock();
             if (dispatch_queue_.empty()) {
               dispatch_cond_.wait(global_lock);
               if (!dispatch_thread_running_) {
+                global_lock.unlock();
                 break;
               }
             }
             auto fn = std::move(dispatch_queue_.front());
             dispatch_queue_.pop_front();
+            global_lock.unlock();
+
             fn();
           }
           return 0;
         }));
-    // As we run guest callbacks the debugger must be able to suspend us.
-    dispatch_thread_->set_can_debugger_suspend(true);
-    dispatch_thread_->set_name("Kernel Dispatch Thread");
+    dispatch_thread_->set_name("Kernel Dispatch");
     dispatch_thread_->Create();
   }
 }
@@ -322,14 +354,15 @@ void KernelState::LoadKernelModule(object_ref<KernelModule> kernel_module) {
   kernel_modules_.push_back(std::move(kernel_module));
 }
 
-object_ref<UserModule> KernelState::LoadUserModule(const char* raw_name,
-                                                   bool call_entry) {
+object_ref<UserModule> KernelState::LoadUserModule(
+    const std::string_view raw_name, bool call_entry) {
   // Some games try to load relative to launch module, others specify full path.
-  std::string name = xe::find_name_from_path(raw_name);
+  auto name = xe::utf8::find_name_from_guest_path(raw_name);
   std::string path(raw_name);
   if (name == raw_name) {
     assert_not_null(executable_module_);
-    path = xe::join_paths(xe::find_base_path(executable_module_->path()), name);
+    path = xe::utf8::join_guest_paths(
+        xe::utf8::find_base_guest_path(executable_module_->path()), name);
   }
 
   object_ref<UserModule> module;
@@ -339,8 +372,7 @@ object_ref<UserModule> KernelState::LoadUserModule(const char* raw_name,
     // See if we've already loaded it
     for (auto& existing_module : user_modules_) {
       if (existing_module->path() == path) {
-        existing_module->Retain();
-        return retain_object(existing_module.get());
+        return existing_module;
       }
     }
 
@@ -350,14 +382,13 @@ object_ref<UserModule> KernelState::LoadUserModule(const char* raw_name,
     module = object_ref<UserModule>(new UserModule(this));
     X_STATUS status = module->LoadFromFile(path);
     if (XFAILED(status)) {
-      object_table()->RemoveHandle(module->handle());
+      object_table()->ReleaseHandle(module->handle());
       return nullptr;
     }
 
     global_lock.lock();
 
-    // Retain when putting into the listing.
-    module->Retain();
+    // Putting into the listing automatically retains.
     user_modules_.push_back(module);
   }
 
@@ -377,6 +408,39 @@ object_ref<UserModule> KernelState::LoadUserModule(const char* raw_name,
   }
 
   return module;
+}
+
+void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
+                                   bool call_entry) {
+  auto global_lock = global_critical_region_.Acquire();
+
+  if (module->is_dll_module() && module->entry_point() && call_entry) {
+    // Call DllMain(DLL_PROCESS_DETACH):
+    // https://msdn.microsoft.com/en-us/library/windows/desktop/ms682583%28v=vs.85%29.aspx
+    uint64_t args[] = {
+        module->handle(),
+        0,  // DLL_PROCESS_DETACH
+        0,  // 0 for now, assume XexUnloadImage is like FreeLibrary
+    };
+    auto thread_state = XThread::GetCurrentThread()->thread_state();
+    processor()->Execute(thread_state, module->entry_point(), args,
+                         xe::countof(args));
+  }
+
+  auto iter = std::find_if(
+      user_modules_.begin(), user_modules_.end(),
+      [&module](const auto& e) { return e->path() == module->path(); });
+  assert_true(iter != user_modules_.end());  // Unloading an unregistered module
+                                             // is probably really bad
+  user_modules_.erase(iter);
+
+  // Ensure this module was not somehow registered twice
+  assert_true(std::find_if(user_modules_.begin(), user_modules_.end(),
+                           [&module](const auto& e) {
+                             return e->path() == module->path();
+                           }) == user_modules_.end());
+
+  object_table()->ReleaseHandle(module->handle());
 }
 
 void KernelState::TerminateTitle() {
@@ -399,14 +463,8 @@ void KernelState::TerminateTitle() {
 
   // Kill all guest threads.
   for (auto it = threads_by_id_.begin(); it != threads_by_id_.end();) {
-    if (it->second->is_guest_thread()) {
+    if (!XThread::IsInThread(it->second) && it->second->is_guest_thread()) {
       auto thread = it->second;
-
-      if (XThread::IsInThread(thread)) {
-        // Don't terminate ourselves.
-        ++it;
-        continue;
-      }
 
       if (thread->is_running()) {
         // Need to step the thread to a safe point (returns it to guest code
@@ -447,6 +505,14 @@ void KernelState::TerminateTitle() {
   // Clear the TLS map.
   tls_bitmap_.Reset();
 
+  // Unset the executable module.
+  executable_module_ = nullptr;
+
+  if (process_info_block_address_) {
+    memory_->SystemHeapFree(process_info_block_address_);
+    process_info_block_address_ = 0;
+  }
+
   if (XThread::IsInThread()) {
     threads_by_id_.erase(XThread::GetCurrentThread()->thread_id());
 
@@ -461,9 +527,11 @@ void KernelState::RegisterThread(XThread* thread) {
   auto global_lock = global_critical_region_.Acquire();
   threads_by_id_[thread->thread_id()] = thread;
 
+  /*
   auto pib =
       memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
   pib->thread_count = pib->thread_count + 1;
+  */
 }
 
 void KernelState::UnregisterThread(XThread* thread) {
@@ -473,9 +541,11 @@ void KernelState::UnregisterThread(XThread* thread) {
     threads_by_id_.erase(it);
   }
 
+  /*
   auto pib =
       memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
   pib->thread_count = pib->thread_count - 1;
+  */
 }
 
 void KernelState::OnThreadExecute(XThread* thread) {
@@ -534,13 +604,13 @@ object_ref<XThread> KernelState::GetThreadByID(uint32_t thread_id) {
   return retain_object(thread);
 }
 
-void KernelState::RegisterNotifyListener(NotifyListener* listener) {
+void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
   auto global_lock = global_critical_region_.Acquire();
   notify_listeners_.push_back(retain_object(listener));
 
   // Games seem to expect a few notifications on startup, only for the first
   // listener.
-  // http://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=resident+evil+5&start=375
+  // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=resident+evil+5&start=375
   if (!has_notified_startup_ && listener->mask() & 0x00000001) {
     has_notified_startup_ = true;
     // XN_SYS_UI (on, off)
@@ -558,7 +628,7 @@ void KernelState::RegisterNotifyListener(NotifyListener* listener) {
   }
 }
 
-void KernelState::UnregisterNotifyListener(NotifyListener* listener) {
+void KernelState::UnregisterNotifyListener(XNotifyListener* listener) {
   auto global_lock = global_critical_region_.Acquire();
   for (auto it = notify_listeners_.begin(); it != notify_listeners_.end();
        ++it) {
@@ -571,9 +641,8 @@ void KernelState::UnregisterNotifyListener(NotifyListener* listener) {
 
 void KernelState::BroadcastNotification(XNotificationID id, uint32_t data) {
   auto global_lock = global_critical_region_.Acquire();
-  for (auto it = notify_listeners_.begin(); it != notify_listeners_.end();
-       ++it) {
-    (*it)->EnqueueNotification(id, data);
+  for (const auto& notify_listener : notify_listeners_) {
+    notify_listener->EnqueueNotification(id, data);
   }
 }
 
@@ -591,6 +660,7 @@ void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
   X_HANDLE event_handle = XOverlappedGetEvent(ptr);
   if (event_handle) {
     auto ev = object_table()->LookupObject<XEvent>(event_handle);
+    assert_not_null(ev);
     if (ev) {
       ev->Set(0, false);
     }
@@ -608,7 +678,11 @@ void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
 
 void KernelState::CompleteOverlappedImmediate(uint32_t overlapped_ptr,
                                               X_RESULT result) {
-  CompleteOverlappedImmediateEx(overlapped_ptr, result, result, 0);
+  // TODO(gibbed): there are games that check 'length' of overlapped as
+  // an indication of success. WTF?
+  // Setting length to -1 when not success seems to be helping.
+  uint32_t length = !result ? 0 : 0xFFFFFFFF;
+  CompleteOverlappedImmediateEx(overlapped_ptr, result, result, length);
 }
 
 void KernelState::CompleteOverlappedImmediateEx(uint32_t overlapped_ptr,
@@ -622,24 +696,62 @@ void KernelState::CompleteOverlappedImmediateEx(uint32_t overlapped_ptr,
 
 void KernelState::CompleteOverlappedDeferred(
     std::function<void()> completion_callback, uint32_t overlapped_ptr,
-    X_RESULT result) {
+    X_RESULT result, std::function<void()> pre_callback,
+    std::function<void()> post_callback) {
   CompleteOverlappedDeferredEx(std::move(completion_callback), overlapped_ptr,
-                               result, result, 0);
+                               result, result, 0, pre_callback, post_callback);
 }
 
 void KernelState::CompleteOverlappedDeferredEx(
     std::function<void()> completion_callback, uint32_t overlapped_ptr,
-    X_RESULT result, uint32_t extended_error, uint32_t length) {
+    X_RESULT result, uint32_t extended_error, uint32_t length,
+    std::function<void()> pre_callback, std::function<void()> post_callback) {
+  CompleteOverlappedDeferredEx(
+      [completion_callback, result, extended_error, length](
+          uint32_t& cb_extended_error, uint32_t& cb_length) -> X_RESULT {
+        completion_callback();
+        cb_extended_error = extended_error;
+        cb_length = length;
+        return result;
+      },
+      overlapped_ptr, pre_callback, post_callback);
+}
+
+void KernelState::CompleteOverlappedDeferred(
+    std::function<X_RESULT()> completion_callback, uint32_t overlapped_ptr,
+    std::function<void()> pre_callback, std::function<void()> post_callback) {
+  CompleteOverlappedDeferredEx(
+      [completion_callback](uint32_t& extended_error,
+                            uint32_t& length) -> X_RESULT {
+        auto result = completion_callback();
+        extended_error = static_cast<uint32_t>(result);
+        length = 0;
+        return result;
+      },
+      overlapped_ptr, pre_callback, post_callback);
+}
+
+void KernelState::CompleteOverlappedDeferredEx(
+    std::function<X_RESULT(uint32_t&, uint32_t&)> completion_callback,
+    uint32_t overlapped_ptr, std::function<void()> pre_callback,
+    std::function<void()> post_callback) {
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
   XOverlappedSetResult(ptr, X_ERROR_IO_PENDING);
   XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
   auto global_lock = global_critical_region_.Acquire();
-  dispatch_queue_.push_back([this, completion_callback, overlapped_ptr, result,
-                             extended_error, length]() {
+  dispatch_queue_.push_back([this, completion_callback, overlapped_ptr,
+                             pre_callback, post_callback]() {
+    if (pre_callback) {
+      pre_callback();
+    }
     xe::threading::Sleep(
         std::chrono::milliseconds(kDeferredOverlappedDelayMillis));
-    completion_callback();
+    uint32_t extended_error, length;
+    auto result = completion_callback(extended_error, length);
     CompleteOverlappedEx(overlapped_ptr, result, extended_error, length);
+    if (post_callback) {
+      post_callback();
+    }
   });
   dispatch_cond_.notify_all();
 }
@@ -666,7 +778,7 @@ bool KernelState::Save(ByteStream* stream) {
   stream->Write(static_cast<uint32_t>(threads.size()));
 
   size_t num_threads = threads.size();
-  XELOGD("Serializing %d threads...", threads.size());
+  XELOGD("Serializing {} threads...", threads.size());
   for (auto thread : threads) {
     if (!thread->is_guest_thread()) {
       // Don't save host threads. They can be reconstructed on startup.
@@ -675,7 +787,7 @@ bool KernelState::Save(ByteStream* stream) {
     }
 
     if (!thread->Save(stream)) {
-      XELOGD("Failed to save thread \"%s\"", thread->name().c_str());
+      XELOGD("Failed to save thread \"{}\"", thread->name());
       num_threads--;
     }
   }
@@ -689,19 +801,19 @@ bool KernelState::Save(ByteStream* stream) {
   stream->Write(static_cast<uint32_t>(objects.size()));
 
   size_t num_objects = objects.size();
-  XELOGD("Serializing %d objects...", num_objects);
+  XELOGD("Serializing {} objects...", num_objects);
   for (auto object : objects) {
     auto prev_offset = stream->offset();
 
-    if (object->is_host_object() || object->type() == XObject::kTypeThread) {
+    if (object->is_host_object() || object->type() == XObject::Type::Thread) {
       // Don't save host objects or save XThreads again
       num_objects--;
       continue;
     }
 
-    stream->Write<uint32_t>(object->type());
+    stream->Write<uint32_t>(static_cast<uint32_t>(object->type()));
     if (!object->Save(stream)) {
-      XELOGD("Did not save object of type %d", object->type());
+      XELOGD("Did not save object of type {}", object->type());
       assert_always();
 
       // Revert backwards and overwrite if a save failed.
@@ -732,9 +844,9 @@ bool KernelState::Restore(ByteStream* stream) {
   }
 
   uint32_t num_threads = stream->Read<uint32_t>();
-  XELOGD("Loading %d threads...", num_threads);
+  XELOGD("Loading {} threads...", num_threads);
   for (uint32_t i = 0; i < num_threads; i++) {
-    auto thread = XObject::Restore(this, XObject::kTypeThread, stream);
+    auto thread = XObject::Restore(this, XObject::Type::Thread, stream);
     if (!thread) {
       // Can't continue the restore or we risk misalignment.
       assert_always();
@@ -743,7 +855,7 @@ bool KernelState::Restore(ByteStream* stream) {
   }
 
   uint32_t num_objects = stream->Read<uint32_t>();
-  XELOGD("Loading %d objects...", num_objects);
+  XELOGD("Loading {} objects...", num_objects);
   for (uint32_t i = 0; i < num_objects; i++) {
     uint32_t type = stream->Read<uint32_t>();
 

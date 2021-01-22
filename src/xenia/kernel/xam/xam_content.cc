@@ -2,168 +2,78 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
+#include "xenia/base/string_util.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/xam_content_device.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xenumerator.h"
 #include "xenia/xbox.h"
+
+DEFINE_int32(
+    license_mask, 0,
+    "Set license mask for activated content.\n"
+    " 0 = No licenses enabled.\n"
+    " 1 = First license enabled. Generally the full version license in\n"
+    "     Xbox Live Arcade titles.\n"
+    " -1 or 0xFFFFFFFF = All possible licenses enabled. Generally a\n"
+    "                    bad idea, could lead to undefined behavior.",
+    "Content");
 
 namespace xe {
 namespace kernel {
 namespace xam {
 
-struct DeviceInfo {
-  uint32_t device_id;
-  uint32_t device_type;
-  uint64_t total_bytes;
-  uint64_t free_bytes;
-  std::wstring name;
-};
-static const DeviceInfo dummy_device_info_ = {
-    0xF00D0000,
-    1,
-    120ull * 1024ull * 1024ull * 1024ull,  // 120GB
-    100ull * 1024ull * 1024ull * 1024ull,  // 100GB, so it looks a little used.
-    L"Dummy HDD",
-};
-
-SHIM_CALL XamContentGetLicenseMask_shim(PPCContext* ppc_context,
-                                        KernelState* kernel_state) {
-  uint32_t mask_ptr = SHIM_GET_ARG_32(0);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(1);
-
-  XELOGD("XamContentGetLicenseMask(%.8X, %.8X)", mask_ptr, overlapped_ptr);
-
+dword_result_t XamContentGetLicenseMask(lpdword_t mask_ptr,
+                                        lpunknown_t overlapped_ptr) {
   // Each bit in the mask represents a granted license. Available licenses
   // seems to vary from game to game, but most appear to use bit 0 to indicate
   // if the game is purchased or not.
-  SHIM_SET_MEM_32(mask_ptr, 0);
+  *mask_ptr = static_cast<uint32_t>(cvars::license_mask);
 
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, X_ERROR_SUCCESS);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr,
+                                                X_ERROR_SUCCESS);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(X_ERROR_SUCCESS);
+    return X_ERROR_SUCCESS;
   }
 }
+DECLARE_XAM_EXPORT2(XamContentGetLicenseMask, kContent, kStub, kHighFrequency);
 
-SHIM_CALL XamContentGetDeviceName_shim(PPCContext* ppc_context,
-                                       KernelState* kernel_state) {
-  uint32_t device_id = SHIM_GET_ARG_32(0);
-  uint32_t name_ptr = SHIM_GET_ARG_32(1);
-  uint32_t name_capacity = SHIM_GET_ARG_32(2);
-
-  XELOGD("XamContentGetDeviceName(%.8X, %.8X, %d)", device_id, name_ptr,
-         name_capacity);
-
-  if ((device_id & 0xFFFF0000) != dummy_device_info_.device_id) {
-    SHIM_SET_RETURN_32(X_ERROR_DEVICE_NOT_CONNECTED);
-    return;
-  }
-
-  if (name_capacity < dummy_device_info_.name.size() + 1) {
-    SHIM_SET_RETURN_32(X_ERROR_INSUFFICIENT_BUFFER);
-    return;
-  }
-
-  xe::store_and_swap<std::wstring>(SHIM_MEM_ADDR(name_ptr),
-                                   dummy_device_info_.name);
-
-  SHIM_SET_RETURN_32(X_ERROR_SUCCESS);
-}
-
-SHIM_CALL XamContentGetDeviceState_shim(PPCContext* ppc_context,
-                                        KernelState* kernel_state) {
-  uint32_t device_id = SHIM_GET_ARG_32(0);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(1);
-
-  XELOGD("XamContentGetDeviceState(%.8X, %.8X)", device_id, overlapped_ptr);
-
-  if ((device_id & 0xFFFF0000) != dummy_device_info_.device_id) {
-    if (overlapped_ptr) {
-      kernel_state->CompleteOverlappedImmediateEx(
-          overlapped_ptr, X_ERROR_FUNCTION_FAILED, X_ERROR_DEVICE_NOT_CONNECTED,
-          0);
-      SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
-    } else {
-      SHIM_SET_RETURN_32(X_ERROR_DEVICE_NOT_CONNECTED);
-    }
-    return;
-  }
-
-  if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, X_ERROR_SUCCESS);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
-  } else {
-    SHIM_SET_RETURN_32(X_ERROR_SUCCESS);
-  }
-}
-
-SHIM_CALL XamContentGetDeviceData_shim(PPCContext* ppc_context,
-                                       KernelState* kernel_state) {
-  uint32_t device_id = SHIM_GET_ARG_32(0);
-  uint32_t device_data_ptr = SHIM_GET_ARG_32(1);
-
-  XELOGD("XamContentGetDeviceData(%.8X, %.8X)", device_id, device_data_ptr);
-
-  if ((device_id & 0xFFFF0000) != dummy_device_info_.device_id) {
-    // TODO(benvanik): memset 0 the data?
-    SHIM_SET_RETURN_32(X_ERROR_DEVICE_NOT_CONNECTED);
-    return;
-  }
-
-  const auto& device_info = dummy_device_info_;
-  SHIM_SET_MEM_32(device_data_ptr + 0, device_info.device_id);
-  SHIM_SET_MEM_32(device_data_ptr + 4, device_id & 0xFFFF);  // Fake it.
-  SHIM_SET_MEM_64(device_data_ptr + 8, device_info.total_bytes);
-  SHIM_SET_MEM_64(device_data_ptr + 16, device_info.free_bytes);
-  xe::store_and_swap<std::wstring>(SHIM_MEM_ADDR(device_data_ptr + 24),
-                                   device_info.name);
-
-  SHIM_SET_RETURN_32(X_ERROR_SUCCESS);
-}
-
-SHIM_CALL XamContentResolve_shim(PPCContext* ppc_context,
-                                 KernelState* kernel_state) {
-  uint32_t user_index = SHIM_GET_ARG_32(0);
-  uint32_t content_data_ptr = SHIM_GET_ARG_32(1);
-  uint32_t buffer_ptr = SHIM_GET_ARG_32(2);
-  uint32_t buffer_size = SHIM_GET_ARG_32(3);
-  uint32_t unk1 = SHIM_GET_ARG_32(4);  // 1
-  uint32_t unk2 = SHIM_GET_ARG_32(5);  // 0
-  uint32_t unk3 = SHIM_GET_ARG_32(6);  // 0
-
-  auto content_data = XCONTENT_DATA(SHIM_MEM_ADDR(content_data_ptr));
-
-  XELOGD("XamContentResolve(%d, %.8X, %.8X, %d, %.8X, %.8X, %.8X)", user_index,
-         content_data_ptr, buffer_ptr, buffer_size, unk1, unk2, unk3);
+dword_result_t XamContentResolve(dword_t user_index, lpvoid_t content_data_ptr,
+                                 lpunknown_t buffer_ptr, dword_t buffer_size,
+                                 dword_t unk1, dword_t unk2, dword_t unk3) {
+  auto content_data = content_data_ptr.as<XCONTENT_DATA*>();
 
   // Result of buffer_ptr is sent to RtlInitAnsiString.
   // buffer_size is usually 260 (max path).
   // Games expect zero if resolve was successful.
   assert_always();
   XELOGW("XamContentResolve unimplemented!");
-
-  SHIM_SET_RETURN_32(X_ERROR_NOT_FOUND);
+  return X_ERROR_NOT_FOUND;
 }
+DECLARE_XAM_EXPORT1(XamContentResolve, kContent, kStub);
 
-// http://gameservice.googlecode.com/svn-history/r14/trunk/ContentManager.cpp
+// https://github.com/MrColdbird/gameservice/blob/master/ContentManager.cpp
 // https://github.com/LestaD/SourceEngine2007/blob/master/se2007/engine/xboxsystem.cpp#L499
 dword_result_t XamContentCreateEnumerator(dword_t user_index, dword_t device_id,
                                           dword_t content_type,
                                           dword_t content_flags,
-                                          dword_t max_count,
+                                          dword_t items_per_enumerate,
                                           lpdword_t buffer_size_ptr,
                                           lpdword_t handle_out) {
   assert_not_null(handle_out);
-  if ((device_id && (device_id & 0xFFFF0000) != dummy_device_info_.device_id) ||
-      !handle_out) {
+
+  auto device_info = device_id == 0 ? nullptr : GetDummyDeviceInfo(device_id);
+  if ((device_id && device_info == nullptr) || !handle_out) {
     if (buffer_size_ptr) {
       *buffer_size_ptr = 0;
     }
@@ -173,44 +83,50 @@ dword_result_t XamContentCreateEnumerator(dword_t user_index, dword_t device_id,
   }
 
   if (buffer_size_ptr) {
-    *buffer_size_ptr = (uint32_t)XCONTENT_DATA::kSize;
+    *buffer_size_ptr = sizeof(XCONTENT_DATA) * items_per_enumerate;
   }
 
-  auto e =
-      new XStaticEnumerator(kernel_state(), max_count, XCONTENT_DATA::kSize);
-  e->Initialize();
+  auto e = object_ref<XStaticEnumerator>(new XStaticEnumerator(
+      kernel_state(), items_per_enumerate, sizeof(XCONTENT_DATA)));
+  auto result = e->Initialize(0xFF, 0xFE, 0x20005, 0x20007, 0);
+  if (XFAILED(result)) {
+    return result;
+  }
 
-  // Get all content data.
-  auto content_datas = kernel_state()->content_manager()->ListContent(
-      device_id ? static_cast<uint32_t>(device_id)
-                : dummy_device_info_.device_id,
-      content_type);
-  for (auto& content_data : content_datas) {
-    auto ptr = e->AppendItem();
-    if (!ptr) {
-      // Too many items.
-      break;
+  if (!device_info || device_info->device_id == DummyDeviceId::HDD) {
+    // Get all content data.
+    auto content_datas = kernel_state()->content_manager()->ListContent(
+        static_cast<uint32_t>(DummyDeviceId::HDD), content_type);
+    for (const auto& content_data : content_datas) {
+      auto item = reinterpret_cast<XCONTENT_DATA*>(e->AppendItem());
+      assert_not_null(item);
+      content_data.Write(item);
     }
-
-    content_data.Write(ptr);
   }
+
+  if (!device_info || device_info->device_id == DummyDeviceId::ODD) {
+    // TODO(gibbed): disc drive content
+  }
+
+  XELOGD("XamContentCreateEnumerator: added {} items to enumerator",
+         e->item_count());
 
   *handle_out = e->handle();
   return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT(XamContentCreateEnumerator, ExportTag::kImplemented);
+DECLARE_XAM_EXPORT1(XamContentCreateEnumerator, kContent, kImplemented);
 
-void XamContentCreateCore(PPCContext* ppc_context, KernelState* kernel_state,
-                          uint32_t user_index, std::string root_name,
-                          XCONTENT_DATA content_data, uint32_t flags,
-                          uint32_t disposition_ptr, uint32_t license_mask_ptr,
-                          uint32_t cache_size, uint64_t content_size,
-                          uint32_t overlapped_ptr) {
-  assert_zero(license_mask_ptr);
-
+dword_result_t XamContentCreateEx(dword_t user_index, lpstring_t root_name,
+                                  lpvoid_t content_data_ptr, dword_t flags,
+                                  lpdword_t disposition_ptr,
+                                  lpdword_t license_mask_ptr,
+                                  dword_t cache_size, qword_t content_size,
+                                  lpvoid_t overlapped_ptr) {
   X_RESULT result = X_ERROR_INVALID_PARAMETER;
+  auto content_data =
+      static_cast<ContentData>(*content_data_ptr.as<XCONTENT_DATA*>());
 
-  auto content_manager = kernel_state->content_manager();
+  auto content_manager = kernel_state()->content_manager();
   bool create = false;
   bool open = false;
   switch (flags & 0xF) {
@@ -261,185 +177,146 @@ void XamContentCreateCore(PPCContext* ppc_context, KernelState* kernel_state,
       break;
   }
 
+  // creation result
+  // 0 = ?
+  // 1 = created
+  // 2 = opened
   uint32_t disposition = create ? 1 : 2;
   if (disposition_ptr) {
     if (overlapped_ptr) {
       // If async always set to zero, but don't set to a real value.
-      SHIM_SET_MEM_32(disposition_ptr, 0);
+      *disposition_ptr = 0;
     } else {
-      SHIM_SET_MEM_32(disposition_ptr, disposition);
+      *disposition_ptr = disposition;
     }
   }
 
   if (create) {
-    result = content_manager->CreateContent(root_name, content_data);
+    result = content_manager->CreateContent(root_name.value(), content_data);
   } else if (open) {
-    result = content_manager->OpenContent(root_name, content_data);
+    result = content_manager->OpenContent(root_name.value(), content_data);
+  }
+
+  if (license_mask_ptr && XSUCCEEDED(result)) {
+    *license_mask_ptr = 0;  // Stub!
   }
 
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediateEx(overlapped_ptr, result,
-                                                disposition, 0);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediateEx(overlapped_ptr, result, 0,
+                                                  disposition);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(result);
+    return result;
   }
 }
+DECLARE_XAM_EXPORT1(XamContentCreateEx, kContent, kImplemented);
 
-SHIM_CALL XamContentCreate_shim(PPCContext* ppc_context,
-                                KernelState* kernel_state) {
-  uint32_t user_index = SHIM_GET_ARG_32(0);
-  uint32_t root_name_ptr = SHIM_GET_ARG_32(1);
-  uint32_t content_data_ptr = SHIM_GET_ARG_32(2);
-  uint32_t flags = SHIM_GET_ARG_32(3);
-  uint32_t disposition_ptr = SHIM_GET_ARG_32(4);
-  uint32_t license_mask_ptr = SHIM_GET_ARG_32(5);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(6);
-
-  auto root_name = xe::load_and_swap<std::string>(SHIM_MEM_ADDR(root_name_ptr));
-  auto content_data = XCONTENT_DATA(SHIM_MEM_ADDR(content_data_ptr));
-
-  XELOGD("XamContentCreate(%d, %.8X(%s), %.8X, %.8X, %.8X, %.8X, %.8X)",
-         user_index, root_name_ptr, root_name.c_str(), content_data_ptr, flags,
-         disposition_ptr, license_mask_ptr, overlapped_ptr);
-
-  XamContentCreateCore(ppc_context, kernel_state, user_index, root_name,
-                       content_data, flags, disposition_ptr, license_mask_ptr,
-                       0, 0, overlapped_ptr);
+dword_result_t XamContentCreate(dword_t user_index, lpstring_t root_name,
+                                lpvoid_t content_data_ptr, dword_t flags,
+                                lpdword_t disposition_ptr,
+                                lpdword_t license_mask_ptr,
+                                lpvoid_t overlapped_ptr) {
+  return XamContentCreateEx(user_index, root_name, content_data_ptr, flags,
+                            disposition_ptr, license_mask_ptr, 0, 0,
+                            overlapped_ptr);
 }
+DECLARE_XAM_EXPORT1(XamContentCreate, kContent, kImplemented);
 
-SHIM_CALL XamContentCreateEx_shim(PPCContext* ppc_context,
-                                  KernelState* kernel_state) {
-  uint32_t user_index = SHIM_GET_ARG_32(0);
-  uint32_t root_name_ptr = SHIM_GET_ARG_32(1);
-  uint32_t content_data_ptr = SHIM_GET_ARG_32(2);
-  uint32_t flags = SHIM_GET_ARG_32(3);
-  uint32_t disposition_ptr = SHIM_GET_ARG_32(4);
-  uint32_t license_mask_ptr = SHIM_GET_ARG_32(5);
-  uint32_t cache_size = SHIM_GET_ARG_32(6);
-  uint64_t content_size = SHIM_GET_ARG_64(7);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(8);
-
-  auto root_name = xe::load_and_swap<std::string>(SHIM_MEM_ADDR(root_name_ptr));
-  auto content_data = XCONTENT_DATA(SHIM_MEM_ADDR(content_data_ptr));
-
-  XELOGD(
-      "XamContentCreateEx(%d, %.8X(%s), %.8X, %.8X, %.8X, %.8X, %.8X, %.8llX, "
-      "%.8X)",
-      user_index, root_name_ptr, root_name.c_str(), content_data_ptr, flags,
-      disposition_ptr, license_mask_ptr, cache_size, content_size,
-      overlapped_ptr);
-
-  XamContentCreateCore(ppc_context, kernel_state, user_index, root_name,
-                       content_data, flags, disposition_ptr, license_mask_ptr,
-                       cache_size, content_size, overlapped_ptr);
+dword_result_t XamContentCreateInternal(
+    lpstring_t root_name, lpvoid_t content_data_ptr, dword_t flags,
+    lpdword_t disposition_ptr, lpdword_t license_mask_ptr, dword_t cache_size,
+    qword_t content_size, lpvoid_t overlapped_ptr) {
+  return XamContentCreateEx(0xFE, root_name, content_data_ptr, flags,
+                            disposition_ptr, license_mask_ptr, cache_size,
+                            content_size, overlapped_ptr);
 }
+DECLARE_XAM_EXPORT1(XamContentCreateInternal, kContent, kImplemented);
 
-dword_result_t XamContentOpenFile(dword_t r3, lpstring_t r4, lpstring_t r5,
-                                  dword_t r6, dword_t r7, dword_t r8,
-                                  dword_t r9) {
+dword_result_t XamContentOpenFile(dword_t user_index, lpstring_t root_name,
+                                  lpstring_t path, dword_t flags,
+                                  lpdword_t disposition_ptr,
+                                  lpdword_t license_mask_ptr,
+                                  lpvoid_t overlapped_ptr) {
+  // TODO(gibbed): arguments assumed based on XamContentCreate.
   return X_ERROR_FILE_NOT_FOUND;
 }
-DECLARE_XAM_EXPORT(XamContentOpenFile, ExportTag::kStub);
+DECLARE_XAM_EXPORT1(XamContentOpenFile, kContent, kStub);
 
-SHIM_CALL XamContentFlush_shim(PPCContext* ppc_context,
-                               KernelState* kernel_state) {
-  uint32_t root_name_ptr = SHIM_GET_ARG_32(0);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(1);
-
-  auto root_name = xe::load_and_swap<std::string>(SHIM_MEM_ADDR(root_name_ptr));
-
-  XELOGD("XamContentFlush(%.8X(%s), %.8X)", root_name_ptr, root_name.c_str(),
-         overlapped_ptr);
-
+dword_result_t XamContentFlush(lpstring_t root_name,
+                               lpunknown_t overlapped_ptr) {
   X_RESULT result = X_ERROR_SUCCESS;
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(result);
+    return result;
   }
 }
+DECLARE_XAM_EXPORT1(XamContentFlush, kContent, kStub);
 
-SHIM_CALL XamContentClose_shim(PPCContext* ppc_context,
-                               KernelState* kernel_state) {
-  uint32_t root_name_ptr = SHIM_GET_ARG_32(0);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(1);
-
-  auto root_name = xe::load_and_swap<std::string>(SHIM_MEM_ADDR(root_name_ptr));
-
-  XELOGD("XamContentClose(%.8X(%s), %.8X)", root_name_ptr, root_name.c_str(),
-         overlapped_ptr);
-
+dword_result_t XamContentClose(lpstring_t root_name,
+                               lpunknown_t overlapped_ptr) {
   // Closes a previously opened root from XamContentCreate*.
-  auto result = kernel_state->content_manager()->CloseContent(root_name);
+  auto result =
+      kernel_state()->content_manager()->CloseContent(root_name.value());
 
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(result);
+    return result;
   }
 }
+DECLARE_XAM_EXPORT1(XamContentClose, kContent, kImplemented);
 
-SHIM_CALL XamContentGetCreator_shim(PPCContext* ppc_context,
-                                    KernelState* kernel_state) {
-  uint32_t user_index = SHIM_GET_ARG_32(0);
-  uint32_t content_data_ptr = SHIM_GET_ARG_32(1);
-  uint32_t is_creator_ptr = SHIM_GET_ARG_32(2);
-  uint32_t creator_xuid_ptr = SHIM_GET_ARG_32(3);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(4);
-
-  auto content_data = XCONTENT_DATA(SHIM_MEM_ADDR(content_data_ptr));
-
-  XELOGD("XamContentGetCreator(%d, %.8X, %.8X, %.8X, %.8X)", user_index,
-         content_data_ptr, is_creator_ptr, creator_xuid_ptr, overlapped_ptr);
-
+dword_result_t XamContentGetCreator(dword_t user_index,
+                                    lpvoid_t content_data_ptr,
+                                    lpdword_t is_creator_ptr,
+                                    lpqword_t creator_xuid_ptr,
+                                    lpunknown_t overlapped_ptr) {
   auto result = X_ERROR_SUCCESS;
+
+  auto content_data =
+      static_cast<ContentData>(*content_data_ptr.as<XCONTENT_DATA*>());
 
   if (content_data.content_type == 1) {
     // User always creates saves.
-    SHIM_SET_MEM_32(is_creator_ptr, 1);
+    *is_creator_ptr = 1;
     if (creator_xuid_ptr) {
-      SHIM_SET_MEM_64(creator_xuid_ptr, kernel_state->user_profile()->xuid());
+      *creator_xuid_ptr = kernel_state()->user_profile()->xuid();
     }
   } else {
-    SHIM_SET_MEM_32(is_creator_ptr, 0);
+    *is_creator_ptr = 0;
     if (creator_xuid_ptr) {
-      SHIM_SET_MEM_64(creator_xuid_ptr, 0);
+      *creator_xuid_ptr = 0;
     }
   }
 
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(result);
+    return result;
   }
 }
+DECLARE_XAM_EXPORT1(XamContentGetCreator, kContent, kImplemented);
 
-SHIM_CALL XamContentGetThumbnail_shim(PPCContext* ppc_context,
-                                      KernelState* kernel_state) {
-  uint32_t user_index = SHIM_GET_ARG_32(0);
-  uint32_t content_data_ptr = SHIM_GET_ARG_32(1);
-  uint32_t buffer_ptr = SHIM_GET_ARG_32(2);
-  uint32_t buffer_size_ptr = SHIM_GET_ARG_32(3);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(4);
-
-  assert_not_zero(buffer_size_ptr);
-  uint32_t buffer_size = SHIM_MEM_32(buffer_size_ptr);
-  auto content_data = XCONTENT_DATA(SHIM_MEM_ADDR(content_data_ptr));
-
-  XELOGD("XamContentGetThumbnail(%d, %.8X, %.8X, %.8X(%d), %.8X)", user_index,
-         content_data_ptr, buffer_ptr, buffer_size_ptr, buffer_size,
-         overlapped_ptr);
+dword_result_t XamContentGetThumbnail(dword_t user_index,
+                                      lpvoid_t content_data_ptr,
+                                      lpvoid_t buffer_ptr,
+                                      lpdword_t buffer_size_ptr,
+                                      lpunknown_t overlapped_ptr) {
+  assert_not_null(buffer_size_ptr);
+  uint32_t buffer_size = *buffer_size_ptr;
+  auto content_data =
+      static_cast<ContentData>(*content_data_ptr.as<XCONTENT_DATA*>());
 
   // Get thumbnail (if it exists).
   std::vector<uint8_t> buffer;
-  auto result = kernel_state->content_manager()->GetContentThumbnail(
+  auto result = kernel_state()->content_manager()->GetContentThumbnail(
       content_data, &buffer);
 
-  SHIM_SET_MEM_32(buffer_size_ptr, uint32_t(buffer.size()));
+  *buffer_size_ptr = uint32_t(buffer.size());
 
   if (XSUCCEEDED(result)) {
     // Write data, if we were given a pointer.
@@ -450,83 +327,68 @@ SHIM_CALL XamContentGetThumbnail_shim(PPCContext* ppc_context,
         result = X_ERROR_INSUFFICIENT_BUFFER;
       } else {
         // Copy data.
-        std::memcpy(SHIM_MEM_ADDR(buffer_ptr), buffer.data(), buffer.size());
+        std::memcpy((uint8_t*)buffer_ptr, buffer.data(), buffer.size());
       }
     }
   }
 
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(result);
+    return result;
   }
 }
+DECLARE_XAM_EXPORT1(XamContentGetThumbnail, kContent, kImplemented);
 
-SHIM_CALL XamContentSetThumbnail_shim(PPCContext* ppc_context,
-                                      KernelState* kernel_state) {
-  uint32_t user_index = SHIM_GET_ARG_32(0);
-  uint32_t content_data_ptr = SHIM_GET_ARG_32(1);
-  uint32_t buffer_ptr = SHIM_GET_ARG_32(2);
-  uint32_t buffer_size = SHIM_GET_ARG_32(3);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(4);
-
-  auto content_data = XCONTENT_DATA(SHIM_MEM_ADDR(content_data_ptr));
-
-  XELOGD("XamContentSetThumbnail(%d, %.8X, %.8X, %d, %.8X)", user_index,
-         content_data_ptr, buffer_ptr, buffer_size, overlapped_ptr);
+dword_result_t XamContentSetThumbnail(dword_t user_index,
+                                      lpvoid_t content_data_ptr,
+                                      lpvoid_t buffer_ptr, dword_t buffer_size,
+                                      lpunknown_t overlapped_ptr) {
+  auto content_data =
+      static_cast<ContentData>(*content_data_ptr.as<XCONTENT_DATA*>());
 
   // Buffer is PNG data.
-  auto buffer = std::vector<uint8_t>(SHIM_MEM_ADDR(buffer_ptr),
-                                     SHIM_MEM_ADDR(buffer_ptr) + buffer_size);
-  auto result = kernel_state->content_manager()->SetContentThumbnail(
+  auto buffer = std::vector<uint8_t>((uint8_t*)buffer_ptr,
+                                     (uint8_t*)buffer_ptr + buffer_size);
+  auto result = kernel_state()->content_manager()->SetContentThumbnail(
       content_data, std::move(buffer));
 
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(result);
+    return result;
   }
 }
+DECLARE_XAM_EXPORT1(XamContentSetThumbnail, kContent, kImplemented);
 
-SHIM_CALL XamContentDelete_shim(PPCContext* ppc_context,
-                                KernelState* kernel_state) {
-  uint32_t user_index = SHIM_GET_ARG_32(0);
-  uint32_t content_data_ptr = SHIM_GET_ARG_32(1);
-  uint32_t overlapped_ptr = SHIM_GET_ARG_32(2);
+dword_result_t XamContentDelete(dword_t user_index, lpvoid_t content_data_ptr,
+                                lpunknown_t overlapped_ptr) {
+  auto content_data =
+      static_cast<ContentData>(*content_data_ptr.as<XCONTENT_DATA*>());
 
-  auto content_data = XCONTENT_DATA(SHIM_MEM_ADDR(content_data_ptr));
-
-  XELOGD("XamContentDelete(%d, %.8X, %.8X)", user_index, content_data_ptr,
-         overlapped_ptr);
-
-  auto result = kernel_state->content_manager()->DeleteContent(content_data);
+  auto result = kernel_state()->content_manager()->DeleteContent(content_data);
 
   if (overlapped_ptr) {
-    kernel_state->CompleteOverlappedImmediate(overlapped_ptr, result);
-    SHIM_SET_RETURN_32(X_ERROR_IO_PENDING);
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
   } else {
-    SHIM_SET_RETURN_32(result);
+    return result;
   }
 }
+DECLARE_XAM_EXPORT1(XamContentDelete, kContent, kImplemented);
+
+dword_result_t XamContentDeleteInternal(lpvoid_t content_data_ptr,
+                                        lpunknown_t overlapped_ptr) {
+  // INFO: Analysis of xam.xex shows that "internal" functions are wrappers with
+  // 0xFE as user_index
+  return XamContentDelete(0xFE, content_data_ptr, overlapped_ptr);
+}
+DECLARE_XAM_EXPORT1(XamContentDeleteInternal, kContent, kImplemented);
 
 void RegisterContentExports(xe::cpu::ExportResolver* export_resolver,
-                            KernelState* kernel_state) {
-  SHIM_SET_MAPPING("xam.xex", XamContentGetLicenseMask, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentGetDeviceName, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentGetDeviceState, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentGetDeviceData, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentResolve, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentCreate, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentCreateEx, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentFlush, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentClose, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentGetCreator, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentGetThumbnail, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentSetThumbnail, state);
-  SHIM_SET_MAPPING("xam.xex", XamContentDelete, state);
-}
+                            KernelState* kernel_state) {}
 
 }  // namespace xam
 }  // namespace kernel

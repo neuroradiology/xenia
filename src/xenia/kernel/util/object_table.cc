@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/logging.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
 
@@ -111,12 +112,13 @@ X_STATUS ObjectTable::AddHandle(XObject* object, X_HANDLE* out_handle) {
       ObjectTableEntry& entry = table_[slot];
       entry.object = object;
       entry.handle_ref_count = 1;
-
-      handle = slot << 2;
+      handle = XObject::kHandleBase + (slot << 2);
       object->handles().push_back(handle);
 
       // Retain so long as the object is in the table.
       object->Retain();
+
+      XELOGI("Added handle:{:08X} for {}", handle, typeid(*object).name());
     }
   }
 
@@ -191,6 +193,7 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
   if (entry->object) {
     auto object = entry->object;
     entry->object = nullptr;
+    assert_zero(entry->handle_ref_count);
     entry->handle_ref_count = 0;
 
     // Walk the object's handles and remove this one.
@@ -199,6 +202,8 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
     if (handle_entry != object->handles().end()) {
       object->handles().erase(handle_entry);
     }
+
+    XELOGI("Removed handle:{:08X} for {}", handle, typeid(*object).name());
 
     // Release now that the object has been removed from the table.
     object->Release();
@@ -213,9 +218,8 @@ std::vector<object_ref<XObject>> ObjectTable::GetAllObjects() {
 
   for (uint32_t slot = 0; slot < table_capacity_; slot++) {
     auto& entry = table_[slot];
-    if (entry.object &&
-        std::find(results.begin(), results.end(), entry.object) ==
-            results.end()) {
+    if (entry.object && std::find(results.begin(), results.end(),
+                                  entry.object) == results.end()) {
       entry.object->Retain();
       results.push_back(object_ref<XObject>(entry.object));
     }
@@ -246,7 +250,7 @@ ObjectTable::ObjectTableEntry* ObjectTable::LookupTable(X_HANDLE handle) {
   auto global_lock = global_critical_region_.Acquire();
 
   // Lower 2 bits are ignored.
-  uint32_t slot = handle >> 2;
+  uint32_t slot = GetHandleSlot(handle);
   if (slot <= table_capacity_) {
     return &table_[slot];
   }
@@ -274,7 +278,7 @@ XObject* ObjectTable::LookupObject(X_HANDLE handle, bool already_locked) {
   }
 
   // Lower 2 bits are ignored.
-  uint32_t slot = handle >> 2;
+  uint32_t slot = GetHandleSlot(handle);
 
   // Verify slot.
   if (slot < table_capacity_) {
@@ -323,42 +327,30 @@ X_HANDLE ObjectTable::TranslateHandle(X_HANDLE handle) {
   }
 }
 
-X_STATUS ObjectTable::AddNameMapping(const std::string& name, X_HANDLE handle) {
-  // Names are case-insensitive.
-  std::string lower_name = name;
-  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
-                 tolower);
-
+X_STATUS ObjectTable::AddNameMapping(const std::string_view name,
+                                     X_HANDLE handle) {
   auto global_lock = global_critical_region_.Acquire();
-  if (name_table_.count(lower_name)) {
+  if (name_table_.count(string_key_case(name))) {
     return X_STATUS_OBJECT_NAME_COLLISION;
   }
-  name_table_.insert({lower_name, handle});
+  name_table_.insert({string_key_case::create(name), handle});
   return X_STATUS_SUCCESS;
 }
 
-void ObjectTable::RemoveNameMapping(const std::string& name) {
+void ObjectTable::RemoveNameMapping(const std::string_view name) {
   // Names are case-insensitive.
-  std::string lower_name = name;
-  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
-                 tolower);
-
   auto global_lock = global_critical_region_.Acquire();
-  auto it = name_table_.find(lower_name);
+  auto it = name_table_.find(string_key_case(name));
   if (it != name_table_.end()) {
     name_table_.erase(it);
   }
 }
 
-X_STATUS ObjectTable::GetObjectByName(const std::string& name,
+X_STATUS ObjectTable::GetObjectByName(const std::string_view name,
                                       X_HANDLE* out_handle) {
   // Names are case-insensitive.
-  std::string lower_name = name;
-  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
-                 tolower);
-
   auto global_lock = global_critical_region_.Acquire();
-  auto it = name_table_.find(lower_name);
+  auto it = name_table_.find(string_key_case(name));
   if (it == name_table_.end()) {
     *out_handle = X_INVALID_HANDLE_VALUE;
     return X_STATUS_OBJECT_NAME_NOT_FOUND;
@@ -397,7 +389,7 @@ bool ObjectTable::Restore(ByteStream* stream) {
 }
 
 X_STATUS ObjectTable::RestoreHandle(X_HANDLE handle, XObject* object) {
-  uint32_t slot = handle >> 2;
+  uint32_t slot = GetHandleSlot(handle);
   assert_true(table_capacity_ >= slot);
 
   if (table_capacity_ >= slot) {

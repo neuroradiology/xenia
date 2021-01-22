@@ -17,14 +17,15 @@
 namespace xe {
 namespace kernel {
 
-// http://www.nirsoft.net/kernel_struct/vista/KEVENT.html
+// https://www.nirsoft.net/kernel_struct/vista/KEVENT.html
 struct X_KEVENT {
   X_DISPATCH_HEADER header;
 };
+static_assert_size(X_KEVENT, 0x10);
 
 class XEvent : public XObject {
  public:
-  static const Type kType = kTypeEvent;
+  static const XObject::Type kObjectType = XObject::Type::Event;
 
   explicit XEvent(KernelState* kernel_state);
   ~XEvent() override;

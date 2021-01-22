@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -15,6 +15,10 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/platform.h"
 
+#if XE_PLATFORM_LINUX
+#include <byteswap.h>
+#endif
+
 namespace xe {
 
 #if XE_PLATFORM_WIN32
@@ -26,9 +30,9 @@ namespace xe {
 #define XENIA_BASE_BYTE_SWAP_32 OSSwapInt32
 #define XENIA_BASE_BYTE_SWAP_64 OSSwapInt64
 #else
-#define XENIA_BASE_BYTE_SWAP_16 __bswap_16
-#define XENIA_BASE_BYTE_SWAP_32 __bswap_32
-#define XENIA_BASE_BYTE_SWAP_64 __bswap_64
+#define XENIA_BASE_BYTE_SWAP_16 bswap_16
+#define XENIA_BASE_BYTE_SWAP_32 bswap_32
+#define XENIA_BASE_BYTE_SWAP_64 bswap_64
 #endif  // XE_PLATFORM_WIN32
 
 inline int8_t byte_swap(int8_t value) { return value; }
@@ -40,8 +44,8 @@ inline int16_t byte_swap(int16_t value) {
 inline uint16_t byte_swap(uint16_t value) {
   return XENIA_BASE_BYTE_SWAP_16(value);
 }
-inline uint16_t byte_swap(wchar_t value) {
-  return static_cast<wchar_t>(XENIA_BASE_BYTE_SWAP_16(value));
+inline uint16_t byte_swap(char16_t value) {
+  return static_cast<char16_t>(XENIA_BASE_BYTE_SWAP_16(value));
 }
 inline int32_t byte_swap(int32_t value) {
   return static_cast<int32_t>(
@@ -69,6 +73,8 @@ template <typename T>
 inline T byte_swap(T value) {
   if (sizeof(T) == 4) {
     return static_cast<T>(byte_swap(static_cast<uint32_t>(value)));
+  } else if (sizeof(T) == 2) {
+    return static_cast<T>(byte_swap(static_cast<uint16_t>(value)));
   } else {
     assert_always("not handled");
   }

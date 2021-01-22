@@ -98,10 +98,10 @@ int XmaContext::Setup(uint32_t id, Memory* memory, uint32_t guest_ptr) {
   return 0;
 }
 
-void XmaContext::Work() {
+bool XmaContext::Work() {
   std::lock_guard<std::mutex> lock(lock_);
   if (!is_allocated() || !is_enabled()) {
-    return;
+    return false;
   }
 
   set_is_enabled(false);
@@ -110,6 +110,7 @@ void XmaContext::Work() {
   XMA_CONTEXT_DATA data(context_ptr);
   DecodePackets(&data);
   data.Store(context_ptr);
+  return true;
 }
 
 void XmaContext::Enable() {
@@ -118,7 +119,7 @@ void XmaContext::Enable() {
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
 
-  XELOGAPU("XmaContext: kicking context %d (buffer %d %d/%d bits)", id(),
+  XELOGAPU("XmaContext: kicking context {} (buffer {} {}/{} bits)", id(),
            data.current_buffer, data.input_buffer_read_offset,
            (data.current_buffer == 0 ? data.input_buffer_0_packet_count
                                      : data.input_buffer_1_packet_count) *
@@ -142,7 +143,7 @@ bool XmaContext::Block(bool poll) {
 
 void XmaContext::Clear() {
   std::lock_guard<std::mutex> lock(lock_);
-  XELOGAPU("XmaContext: reset context %d", id());
+  XELOGAPU("XmaContext: reset context {}", id());
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
@@ -159,7 +160,7 @@ void XmaContext::Clear() {
 
 void XmaContext::Disable() {
   std::lock_guard<std::mutex> lock(lock_);
-  XELOGAPU("XmaContext: disabling context %d", id());
+  XELOGAPU("XmaContext: disabling context {}", id());
   set_is_enabled(false);
 }
 
@@ -224,6 +225,11 @@ bool XmaContext::ValidFrameOffset(uint8_t* block, size_t size_bytes,
                                   size_t frame_offset_bits) {
   uint32_t packet_num =
       GetFramePacketNumber(block, size_bytes, frame_offset_bits);
+  if (packet_num == -1) {
+    // Invalid packet number
+    return false;
+  }
+
   uint8_t* packet = block + (packet_num * kBytesPerPacket);
   size_t relative_offset_bits = frame_offset_bits % (kBytesPerPacket * 8);
 
@@ -296,10 +302,9 @@ void XmaContext::DecodePackets(XMA_CONTEXT_DATA* data) {
 
   // No available data.
   if (!data->input_buffer_0_valid && !data->input_buffer_1_valid) {
+    data->output_buffer_valid = 0;
     return;
   }
-
-  assert_zero(data->unk_dword_9);
 
   // XAudio Loops
   // loop_count:
@@ -319,7 +324,7 @@ void XmaContext::DecodePackets(XMA_CONTEXT_DATA* data) {
                      : nullptr;
   uint8_t* current_input_buffer = data->current_buffer ? in1 : in0;
 
-  XELOGAPU("Processing context %d (offset %d, buffer %d, ptr %.8X)", id(),
+  XELOGAPU("Processing context {} (offset {}, buffer {}, ptr {:p})", id(),
            data->input_buffer_read_offset, data->current_buffer,
            current_input_buffer);
 
@@ -388,7 +393,7 @@ void XmaContext::DecodePackets(XMA_CONTEXT_DATA* data) {
 
     if (!ValidFrameOffset(current_input_buffer, current_input_size,
                           data->input_buffer_read_offset)) {
-      XELOGAPU("XmaContext %d: Invalid read offset %d!", id(),
+      XELOGAPU("XmaContext {}: Invalid read offset {}!", id(),
                data->input_buffer_read_offset);
       if (data->current_buffer == 0) {
         data->current_buffer = 1;
@@ -437,7 +442,7 @@ void XmaContext::DecodePackets(XMA_CONTEXT_DATA* data) {
       }
 
       if (partial_frame_saved_) {
-        XELOGAPU("XmaContext %d: saved a partial frame", id());
+        XELOGAPU("XmaContext {}: saved a partial frame", id());
 
         if (data->current_buffer == 0) {
           data->input_buffer_0_valid = 0;
@@ -481,7 +486,7 @@ void XmaContext::DecodePackets(XMA_CONTEXT_DATA* data) {
     bool partial = false;
     size_t bit_offset = data->input_buffer_read_offset;
     if (partial_frame_saved_) {
-      XELOGAPU("XmaContext %d: processing saved partial frame", id());
+      XELOGAPU("XmaContext {}: processing saved partial frame", id());
       packet_->data = partial_frame_buffer_.data();
       packet_->size = (int)partial_frame_buffer_.size();
 

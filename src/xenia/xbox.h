@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -27,7 +27,7 @@ typedef uint32_t X_HANDLE;
 // TODO(benvanik): type all of this so we get some safety.
 
 // NT_STATUS (STATUS_*)
-// http://msdn.microsoft.com/en-us/library/cc704588.aspx
+// https://msdn.microsoft.com/en-us/library/cc704588.aspx
 // Adding as needed.
 typedef uint32_t X_STATUS;
 #define XSUCCEEDED(s)     ((s & 0xC0000000) == 0)
@@ -56,83 +56,101 @@ typedef uint32_t X_STATUS;
 #define X_STATUS_ACCESS_DENIED                          ((X_STATUS)0xC0000022L)
 #define X_STATUS_BUFFER_TOO_SMALL                       ((X_STATUS)0xC0000023L)
 #define X_STATUS_OBJECT_TYPE_MISMATCH                   ((X_STATUS)0xC0000024L)
+#define X_STATUS_OBJECT_NAME_INVALID                    ((X_STATUS)0xC0000033L)
 #define X_STATUS_OBJECT_NAME_NOT_FOUND                  ((X_STATUS)0xC0000034L)
 #define X_STATUS_OBJECT_NAME_COLLISION                  ((X_STATUS)0xC0000035L)
 #define X_STATUS_INVALID_PAGE_PROTECTION                ((X_STATUS)0xC0000045L)
 #define X_STATUS_MUTANT_NOT_OWNED                       ((X_STATUS)0xC0000046L)
+#define X_STATUS_PROCEDURE_NOT_FOUND                    ((X_STATUS)0xC000007AL)
 #define X_STATUS_INSUFFICIENT_RESOURCES                 ((X_STATUS)0xC000009AL)
 #define X_STATUS_MEMORY_NOT_ALLOCATED                   ((X_STATUS)0xC00000A0L)
+#define X_STATUS_FILE_IS_A_DIRECTORY                    ((X_STATUS)0xC00000BAL)
+#define X_STATUS_NOT_SUPPORTED                          ((X_STATUS)0xC00000BBL)
 #define X_STATUS_INVALID_PARAMETER_1                    ((X_STATUS)0xC00000EFL)
 #define X_STATUS_INVALID_PARAMETER_2                    ((X_STATUS)0xC00000F0L)
 #define X_STATUS_INVALID_PARAMETER_3                    ((X_STATUS)0xC00000F1L)
 #define X_STATUS_DLL_NOT_FOUND                          ((X_STATUS)0xC0000135L)
+#define X_STATUS_ENTRYPOINT_NOT_FOUND                   ((X_STATUS)0xC0000139L)
 #define X_STATUS_MAPPED_ALIGNMENT                       ((X_STATUS)0xC0000220L)
 #define X_STATUS_NOT_FOUND                              ((X_STATUS)0xC0000225L)
 #define X_STATUS_DRIVER_ORDINAL_NOT_FOUND               ((X_STATUS)0xC0000262L)
 #define X_STATUS_DRIVER_ENTRYPOINT_NOT_FOUND            ((X_STATUS)0xC0000263L)
 
-// HRESULT (ERROR_*)
+// Win32 error codes (ERROR_*)
+// https://msdn.microsoft.com/en-us/library/windows/desktop/ms681381(v=vs.85).aspx
 // Adding as needed.
-// For some reason, half of these aren't *actually* HRESULTs.
-// Windows is a weird place.
 typedef uint32_t X_RESULT;
-#define X_FACILITY_WIN32 7
-#define X_RESULT_FROM_WIN32(x) x
-// Maybe X_RESULT_FROM_WIN32 is this instead?:
-// ((X_RESULT)(x) <= 0 ? ((X_RESULT)(x)) :
-//     ((X_RESULT) (((x) & 0x0000FFFF) | (X_FACILITY_WIN32 << 16) | 0x80000000)))
-#define X_ERROR_SUCCESS                                 X_RESULT_FROM_WIN32(0x00000000L)
-#define X_ERROR_FILE_NOT_FOUND                          X_RESULT_FROM_WIN32(0x00000002L)
-#define X_ERROR_PATH_NOT_FOUND                          X_RESULT_FROM_WIN32(0x00000003L)
-#define X_ERROR_ACCESS_DENIED                           X_RESULT_FROM_WIN32(0x00000005L)
-#define X_ERROR_INVALID_HANDLE                          X_RESULT_FROM_WIN32(0x00000006L)
-#define X_ERROR_NO_MORE_FILES                           X_RESULT_FROM_WIN32(0x00000012L)
-#define X_ERROR_INVALID_PARAMETER                       X_RESULT_FROM_WIN32(0x00000057L)
-#define X_ERROR_IO_PENDING                              X_RESULT_FROM_WIN32(0x000003E5L)
-#define X_ERROR_INSUFFICIENT_BUFFER                     X_RESULT_FROM_WIN32(0x0000007AL)
-#define X_ERROR_INVALID_NAME                            X_RESULT_FROM_WIN32(0x0000007BL)
-#define X_ERROR_BAD_ARGUMENTS                           X_RESULT_FROM_WIN32(0x000000A0L)
-#define X_ERROR_BUSY                                    X_RESULT_FROM_WIN32(0x000000AAL)
-#define X_ERROR_ALREADY_EXISTS                          X_RESULT_FROM_WIN32(0x000000B7L)
-#define X_ERROR_DEVICE_NOT_CONNECTED                    X_RESULT_FROM_WIN32(0x0000048FL)
-#define X_ERROR_NOT_FOUND                               X_RESULT_FROM_WIN32(0x00000490L)
-#define X_ERROR_CANCELLED                               X_RESULT_FROM_WIN32(0x000004C7L)
-#define X_ERROR_NOT_LOGGED_ON                           X_RESULT_FROM_WIN32(0x000004DDL)
-#define X_ERROR_NO_SUCH_USER                            X_RESULT_FROM_WIN32(0x00000525L)
-#define X_ERROR_FUNCTION_FAILED                         X_RESULT_FROM_WIN32(0x0000065BL)
-#define X_ERROR_EMPTY                                   X_RESULT_FROM_WIN32(0x000010D2L)
+#define X_FACILITY_WIN32 0x0007
+#define X_RESULT_FROM_WIN32(x) ((X_RESULT)(x))
 
+#define X_ERROR_SUCCESS                         X_RESULT_FROM_WIN32(0x00000000L)
+#define X_ERROR_FILE_NOT_FOUND                  X_RESULT_FROM_WIN32(0x00000002L)
+#define X_ERROR_PATH_NOT_FOUND                  X_RESULT_FROM_WIN32(0x00000003L)
+#define X_ERROR_ACCESS_DENIED                   X_RESULT_FROM_WIN32(0x00000005L)
+#define X_ERROR_INVALID_HANDLE                  X_RESULT_FROM_WIN32(0x00000006L)
+#define X_ERROR_NO_MORE_FILES                   X_RESULT_FROM_WIN32(0x00000012L)
+#define X_ERROR_INVALID_PARAMETER               X_RESULT_FROM_WIN32(0x00000057L)
+#define X_ERROR_INSUFFICIENT_BUFFER             X_RESULT_FROM_WIN32(0x0000007AL)
+#define X_ERROR_INVALID_NAME                    X_RESULT_FROM_WIN32(0x0000007BL)
+#define X_ERROR_BAD_ARGUMENTS                   X_RESULT_FROM_WIN32(0x000000A0L)
+#define X_ERROR_BUSY                            X_RESULT_FROM_WIN32(0x000000AAL)
+#define X_ERROR_ALREADY_EXISTS                  X_RESULT_FROM_WIN32(0x000000B7L)
+#define X_ERROR_IO_INCOMPLETE                   X_RESULT_FROM_WIN32(0x000003E4L)
+#define X_ERROR_IO_PENDING                      X_RESULT_FROM_WIN32(0x000003E5L)
+#define X_ERROR_DEVICE_NOT_CONNECTED            X_RESULT_FROM_WIN32(0x0000048FL)
+#define X_ERROR_NOT_FOUND                       X_RESULT_FROM_WIN32(0x00000490L)
+#define X_ERROR_CANCELLED                       X_RESULT_FROM_WIN32(0x000004C7L)
+#define X_ERROR_NOT_LOGGED_ON                   X_RESULT_FROM_WIN32(0x000004DDL)
+#define X_ERROR_NO_SUCH_USER                    X_RESULT_FROM_WIN32(0x00000525L)
+#define X_ERROR_FUNCTION_FAILED                 X_RESULT_FROM_WIN32(0x0000065BL)
+#define X_ERROR_EMPTY                           X_RESULT_FROM_WIN32(0x000010D2L)
+
+// HRESULT codes
 typedef uint32_t X_HRESULT;
-#define X_E_SUCCESS                                     static_cast<X_HRESULT>(0)
-#define X_E_FALSE                                       static_cast<X_HRESULT>(0x80000000L)
-#define X_E_INVALIDARG                                  static_cast<X_HRESULT>(0x80070057L)
+#define X_HRESULT_FROM_WIN32(x) ((int32_t)(x) <= 0 \
+                                  ? (static_cast<X_HRESULT>(x)) \
+                                  : (static_cast<X_HRESULT>(((x) & 0xFFFF) | (X_FACILITY_WIN32 << 16) | \
+                                    0x80000000L)))
+
+#define X_E_FALSE                               static_cast<X_HRESULT>(0x80000000L)
+#define X_E_SUCCESS                             X_HRESULT_FROM_WIN32(X_ERROR_SUCCESS)
+#define X_E_FAIL                                static_cast<X_HRESULT>(0x80004005L)
+#define X_E_NO_MORE_FILES                       X_HRESULT_FROM_WIN32(X_ERROR_NO_MORE_FILES)
+#define X_E_INVALIDARG                          X_HRESULT_FROM_WIN32(X_ERROR_INVALID_PARAMETER)
+#define X_E_DEVICE_NOT_CONNECTED                X_HRESULT_FROM_WIN32(X_ERROR_DEVICE_NOT_CONNECTED)
+#define X_E_NOTFOUND                            X_HRESULT_FROM_WIN32(X_ERROR_NOT_FOUND)
+#define X_E_NO_SUCH_USER                        X_HRESULT_FROM_WIN32(X_ERROR_NO_SUCH_USER)
 
 // MEM_*, used by NtAllocateVirtualMemory
-#define X_MEM_COMMIT              0x00001000
-#define X_MEM_RESERVE             0x00002000
-#define X_MEM_DECOMMIT            0x00004000
-#define X_MEM_RELEASE             0x00008000
-#define X_MEM_FREE                0x00010000
-#define X_MEM_PRIVATE             0x00020000
-#define X_MEM_RESET               0x00080000
-#define X_MEM_TOP_DOWN            0x00100000
-#define X_MEM_NOZERO              0x00800000
-#define X_MEM_LARGE_PAGES         0x20000000
-#define X_MEM_HEAP                0x40000000
-#define X_MEM_16MB_PAGES          0x80000000  // from Valve SDK
+enum X_MEM : uint32_t {
+  X_MEM_COMMIT      = 0x00001000,
+  X_MEM_RESERVE     = 0x00002000,
+  X_MEM_DECOMMIT    = 0x00004000,
+  X_MEM_RELEASE     = 0x00008000,
+  X_MEM_FREE        = 0x00010000,
+  X_MEM_PRIVATE     = 0x00020000,
+  X_MEM_RESET       = 0x00080000,
+  X_MEM_TOP_DOWN    = 0x00100000,
+  X_MEM_NOZERO      = 0x00800000,
+  X_MEM_LARGE_PAGES = 0x20000000,
+  X_MEM_HEAP        = 0x40000000,
+  X_MEM_16MB_PAGES  = 0x80000000  // from Valve SDK
+};
 
 // PAGE_*, used by NtAllocateVirtualMemory
-#define X_PAGE_NOACCESS           0x00000001
-#define X_PAGE_READONLY           0x00000002
-#define X_PAGE_READWRITE          0x00000004
-#define X_PAGE_WRITECOPY          0x00000008
-#define X_PAGE_EXECUTE            0x00000010
-#define X_PAGE_EXECUTE_READ       0x00000020
-#define X_PAGE_EXECUTE_READWRITE  0x00000040
-#define X_PAGE_EXECUTE_WRITECOPY  0x00000080
-#define X_PAGE_GUARD              0x00000100
-#define X_PAGE_NOCACHE            0x00000200
-#define X_PAGE_WRITECOMBINE       0x00000400
+enum X_PAGE : uint32_t {
+  X_PAGE_NOACCESS          = 0x00000001,
+  X_PAGE_READONLY          = 0x00000002,
+  X_PAGE_READWRITE         = 0x00000004,
+  X_PAGE_WRITECOPY         = 0x00000008,
+  X_PAGE_EXECUTE           = 0x00000010,
+  X_PAGE_EXECUTE_READ      = 0x00000020,
+  X_PAGE_EXECUTE_READWRITE = 0x00000040,
+  X_PAGE_EXECUTE_WRITECOPY = 0x00000080,
+  X_PAGE_GUARD             = 0x00000100,
+  X_PAGE_NOCACHE           = 0x00000200,
+  X_PAGE_WRITECOMBINE      = 0x00000400
+};
 
 // Sockets/networking.
 #define X_INVALID_SOCKET (uint32_t)(~0)
@@ -152,47 +170,6 @@ enum X_FILE_ATTRIBUTES : uint32_t {
   X_FILE_ATTRIBUTE_TEMPORARY = 0x0100,
   X_FILE_ATTRIBUTE_COMPRESSED = 0x0800,
   X_FILE_ATTRIBUTE_ENCRYPTED = 0x4000,
-};
-
-// http://code.google.com/p/vdash/source/browse/trunk/vdash/include/kernel.h
-enum X_FILE_INFORMATION_CLASS {
-  XFileDirectoryInformation = 1,
-  XFileFullDirectoryInformation,
-  XFileBothDirectoryInformation,
-  XFileBasicInformation,
-  XFileStandardInformation,
-  XFileInternalInformation,
-  XFileEaInformation,
-  XFileAccessInformation,
-  XFileNameInformation,
-  XFileRenameInformation,
-  XFileLinkInformation,
-  XFileNamesInformation,
-  XFileDispositionInformation,
-  XFilePositionInformation,
-  XFileFullEaInformation,
-  XFileModeInformation,
-  XFileAlignmentInformation,
-  XFileAllInformation,
-  XFileAllocationInformation,
-  XFileEndOfFileInformation,
-  XFileAlternateNameInformation,
-  XFileStreamInformation,
-  XFileMountPartitionInformation,
-  XFileMountPartitionsInformation,
-  XFilePipeRemoteInformation,
-  XFileSectorInformation,
-  XFileXctdCompressionInformation,
-  XFileCompressionInformation,
-  XFileObjectIdInformation,
-  XFileCompletionInformation,
-  XFileMoveClusterInformation,
-  XFileIoPriorityInformation,
-  XFileReparsePointInformation,
-  XFileNetworkOpenInformation,
-  XFileAttributeTagInformation,
-  XFileTrackingInformation,
-  XFileMaximumInformation
 };
 
 // Known as XOVERLAPPED to 360 code.
@@ -252,46 +229,10 @@ struct X_ANSI_STRING {
   xe::be<uint16_t> maximum_length;
   xe::be<uint32_t> pointer;
 
-  static X_ANSI_STRING* Translate(uint8_t* membase, uint32_t guest_address) {
-    if (!guest_address) {
-      return nullptr;
-    }
-    return reinterpret_cast<X_ANSI_STRING*>(membase + guest_address);
-  }
-
-  static X_ANSI_STRING* TranslateIndirect(uint8_t* membase,
-                                          uint32_t guest_address_ptr) {
-    if (!guest_address_ptr) {
-      return nullptr;
-    }
-    uint32_t guest_address =
-        xe::load_and_swap<uint32_t>(membase + guest_address_ptr);
-    return Translate(membase, guest_address);
-  }
-
-  static std::string to_string(uint8_t* membase, uint32_t guest_address) {
-    auto str = Translate(membase, guest_address);
-    return str ? str->to_string(membase) : "";
-  }
-
-  static std::string to_string_indirect(uint8_t* membase,
-                                        uint32_t guest_address_ptr) {
-    auto str = TranslateIndirect(membase, guest_address_ptr);
-    return str ? str->to_string(membase) : "";
-  }
-
   void reset() {
     length = 0;
     maximum_length = 0;
     pointer = 0;
-  }
-
-  std::string to_string(uint8_t* membase) const {
-    if (!length) {
-      return "";
-    }
-    return std::string(reinterpret_cast<const char*>(membase + pointer),
-                       length);
   }
 };
 static_assert_size(X_ANSI_STRING, 8);
@@ -306,22 +247,13 @@ struct X_UNICODE_STRING {
     maximum_length = 0;
     pointer = 0;
   }
-
-  std::wstring to_string(uint8_t* membase) const {
-    if (!length) {
-      return L"";
-    }
-
-    return std::wstring(reinterpret_cast<const wchar_t*>(membase + pointer),
-                        length);
-  }
 };
 static_assert_size(X_UNICODE_STRING, 8);
 
-// http://pastebin.com/SMypYikG
+// https://pastebin.com/SMypYikG
 typedef uint32_t XNotificationID;
 
-// http://ffplay360.googlecode.com/svn/trunk/Common/XTLOnPC.h
+// https://github.com/CodeAsm/ffplay360/blob/master/Common/XTLOnPC.h
 struct X_VIDEO_MODE {
   be<uint32_t> display_width;
   be<uint32_t> display_height;
@@ -336,17 +268,10 @@ struct X_VIDEO_MODE {
 };
 static_assert_size(X_VIDEO_MODE, 48);
 
+// https://docs.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-list_entry
 struct X_LIST_ENTRY {
   be<uint32_t> flink_ptr;  // next entry / head
   be<uint32_t> blink_ptr;  // previous entry / head
-
-  // Assumes X_LIST_ENTRY is within guest memory!
-  void initialize(uint8_t* virtual_membase) {
-    flink_ptr = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(this) -
-                                      virtual_membase);
-    blink_ptr = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(this) -
-                                      virtual_membase);
-  }
 };
 static_assert_size(X_LIST_ENTRY, 8);
 
@@ -355,7 +280,7 @@ struct X_SINGLE_LIST_ENTRY {
 };
 static_assert_size(X_SINGLE_LIST_ENTRY, 4);
 
-// http://www.nirsoft.net/kernel_struct/vista/SLIST_HEADER.html
+// https://www.nirsoft.net/kernel_struct/vista/SLIST_HEADER.html
 struct X_SLIST_HEADER {
   X_SINGLE_LIST_ENTRY next;  // 0x0
   be<uint16_t> depth;        // 0x4
@@ -384,6 +309,17 @@ struct X_OBJECT_ATTRIBUTES {
   xe::be<uint32_t> name_ptr;        // 0x4 PANSI_STRING
   xe::be<uint32_t> attributes;      // 0xC
 };
+
+// https://msdn.microsoft.com/en-us/library/windows/desktop/aa363082.aspx
+typedef struct {
+  xe::be<uint32_t> exception_code;
+  xe::be<uint32_t> exception_flags;
+  xe::be<uint32_t> exception_record;
+  xe::be<uint32_t> exception_address;
+  xe::be<uint32_t> number_parameters;
+  xe::be<uint32_t> exception_information[15];
+} X_EXCEPTION_RECORD;
+static_assert_size(X_EXCEPTION_RECORD, 0x50);
 
 #pragma pack(pop)
 

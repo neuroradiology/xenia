@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -25,7 +25,7 @@ class UserProfile {
  public:
   struct Setting {
     enum class Type {
-      UNKNOWN = 0,
+      CONTENT = 0,
       INT32 = 1,
       INT64 = 2,
       DOUBLE = 3,
@@ -47,8 +47,14 @@ class UserProfile {
     uint32_t setting_id;
     Type type;
     size_t size;
-    Setting(uint32_t setting_id, Type type, size_t size)
-        : setting_id(setting_id), type(type), size(size) {}
+    bool is_set;
+    uint32_t loaded_title_id;
+    Setting(uint32_t setting_id, Type type, size_t size, bool is_set)
+        : setting_id(setting_id),
+          type(type),
+          size(size),
+          is_set(is_set),
+          loaded_title_id(0) {}
     virtual size_t extra_size() const { return 0; }
     virtual size_t Append(uint8_t* user_data, uint8_t* buffer,
                           uint32_t buffer_ptr, size_t buffer_offset) {
@@ -56,6 +62,10 @@ class UserProfile {
                                   static_cast<uint8_t>(type));
       return buffer_offset;
     }
+    virtual std::vector<uint8_t> Serialize() const {
+      return std::vector<uint8_t>();
+    }
+    virtual void Deserialize(std::vector<uint8_t>) {}
     bool is_title_specific() const { return (setting_id & 0x3F00) == 0x3F00; }
 
    protected:
@@ -65,7 +75,7 @@ class UserProfile {
   };
   struct Int32Setting : public Setting {
     Int32Setting(uint32_t setting_id, int32_t value)
-        : Setting(setting_id, Type::INT32, 4), value(value) {}
+        : Setting(setting_id, Type::INT32, 4, true), value(value) {}
     int32_t value;
     size_t Append(uint8_t* user_data, uint8_t* buffer, uint32_t buffer_ptr,
                   size_t buffer_offset) override {
@@ -77,7 +87,7 @@ class UserProfile {
   };
   struct Int64Setting : public Setting {
     Int64Setting(uint32_t setting_id, int64_t value)
-        : Setting(setting_id, Type::INT64, 8), value(value) {}
+        : Setting(setting_id, Type::INT64, 8, true), value(value) {}
     int64_t value;
     size_t Append(uint8_t* user_data, uint8_t* buffer, uint32_t buffer_ptr,
                   size_t buffer_offset) override {
@@ -89,7 +99,7 @@ class UserProfile {
   };
   struct DoubleSetting : public Setting {
     DoubleSetting(uint32_t setting_id, double value)
-        : Setting(setting_id, Type::DOUBLE, 8), value(value) {}
+        : Setting(setting_id, Type::DOUBLE, 8, true), value(value) {}
     double value;
     size_t Append(uint8_t* user_data, uint8_t* buffer, uint32_t buffer_ptr,
                   size_t buffer_offset) override {
@@ -100,9 +110,9 @@ class UserProfile {
     }
   };
   struct UnicodeSetting : public Setting {
-    UnicodeSetting(uint32_t setting_id, const std::wstring& value)
-        : Setting(setting_id, Type::WSTRING, 8), value(value) {}
-    std::wstring value;
+    UnicodeSetting(uint32_t setting_id, const std::u16string& value)
+        : Setting(setting_id, Type::WSTRING, 8, true), value(value) {}
+    std::u16string value;
     size_t extra_size() const override {
       return value.empty() ? 0 : 2 * (static_cast<int32_t>(value.size()) + 1);
     }
@@ -128,7 +138,7 @@ class UserProfile {
   };
   struct FloatSetting : public Setting {
     FloatSetting(uint32_t setting_id, float value)
-        : Setting(setting_id, Type::FLOAT, 4), value(value) {}
+        : Setting(setting_id, Type::FLOAT, 4, true), value(value) {}
     float value;
     size_t Append(uint8_t* user_data, uint8_t* buffer, uint32_t buffer_ptr,
                   size_t buffer_offset) override {
@@ -139,8 +149,10 @@ class UserProfile {
     }
   };
   struct BinarySetting : public Setting {
+    BinarySetting(uint32_t setting_id)
+        : Setting(setting_id, Type::BINARY, 8, false), value() {}
     BinarySetting(uint32_t setting_id, const std::vector<uint8_t>& value)
-        : Setting(setting_id, Type::BINARY, 8), value(value) {}
+        : Setting(setting_id, Type::BINARY, 8, true), value(value) {}
     std::vector<uint8_t> value;
     size_t extra_size() const override {
       return static_cast<int32_t>(value.size());
@@ -164,10 +176,17 @@ class UserProfile {
       }
       return buffer_offset + length;
     }
+    std::vector<uint8_t> Serialize() const override {
+      return std::vector<uint8_t>(value.data(), value.data() + value.size());
+    }
+    void Deserialize(std::vector<uint8_t> data) override {
+      value = data;
+      is_set = true;
+    }
   };
   struct DateTimeSetting : public Setting {
     DateTimeSetting(uint32_t setting_id, int64_t value)
-        : Setting(setting_id, Type::DATETIME, 8), value(value) {}
+        : Setting(setting_id, Type::DATETIME, 8, true), value(value) {}
     int64_t value;
     size_t Append(uint8_t* user_data, uint8_t* buffer, uint32_t buffer_ptr,
                   size_t buffer_offset) override {
@@ -183,6 +202,7 @@ class UserProfile {
   uint64_t xuid() const { return xuid_; }
   std::string name() const { return name_; }
   uint32_t signin_state() const { return 1; }
+  uint32_t type() const { return 1 | 2; /* local | online profile? */ }
 
   void AddSetting(std::unique_ptr<Setting> setting);
   Setting* GetSetting(uint32_t setting_id);
@@ -192,6 +212,9 @@ class UserProfile {
   std::string name_;
   std::vector<std::unique_ptr<Setting>> setting_list_;
   std::unordered_map<uint32_t, Setting*> settings_;
+
+  void LoadSetting(UserProfile::Setting*);
+  void SaveSetting(UserProfile::Setting*);
 };
 
 }  // namespace xam

@@ -9,8 +9,6 @@
 
 #include "xenia/cpu/ppc/ppc_translator.h"
 
-#include <gflags/gflags.h>
-
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/memory.h"
@@ -41,7 +39,7 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
   assembler_ = backend->CreateAssembler();
   assembler_->Initialize();
 
-  bool validate = FLAGS_validate_hir;
+  bool validate = cvars::validate_hir;
 
   // Merge blocks early. This will let us use more context in other passes.
   // The CFG is required for simplification and dirtied by it.
@@ -53,10 +51,16 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
   if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
   compiler_->AddPass(std::make_unique<passes::ContextPromotionPass>());
   if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
-  compiler_->AddPass(std::make_unique<passes::SimplificationPass>());
-  if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
-  compiler_->AddPass(std::make_unique<passes::ConstantPropagationPass>());
-  if (validate) compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+
+  // Grouped simplification + constant propagation.
+  // Loops until no changes are made.
+  auto sap = std::make_unique<passes::ConditionalGroupPass>();
+  sap->AddPass(std::make_unique<passes::SimplificationPass>());
+  if (validate) sap->AddPass(std::make_unique<passes::ValidationPass>());
+  sap->AddPass(std::make_unique<passes::ConstantPropagationPass>());
+  if (validate) sap->AddPass(std::make_unique<passes::ValidationPass>());
+  compiler_->AddPass(std::move(sap));
+
   if (backend->machine_info()->supports_extended_load_store) {
     // Backend supports the advanced LOAD/STORE instructions.
     // These will save us a lot of HIR opcodes.
@@ -102,19 +106,19 @@ bool PPCTranslator::Translate(GuestFunction* function,
   xe::make_reset_scope(&string_buffer_);
 
   // NOTE: we only want to do this when required, as it's expensive to build.
-  if (FLAGS_disassemble_functions) {
+  if (cvars::disassemble_functions) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoAllDisasm;
   }
-  if (FLAGS_trace_functions) {
+  if (cvars::trace_functions) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctions;
   }
-  if (FLAGS_trace_function_coverage) {
+  if (cvars::trace_function_coverage) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionCoverage;
   }
-  if (FLAGS_trace_function_references) {
+  if (cvars::trace_function_references) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionReferences;
   }
-  if (FLAGS_trace_function_data) {
+  if (cvars::trace_function_data) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionData;
   }
   std::unique_ptr<FunctionDebugInfo> debug_info;
@@ -151,7 +155,7 @@ bool PPCTranslator::Translate(GuestFunction* function,
   // Stash source.
   if (debug_info_flags & DebugInfoFlags::kDebugInfoDisasmSource) {
     DumpSource(function, &string_buffer_);
-    debug_info->set_source_disasm(string_buffer_.ToString());
+    debug_info->set_source_disasm(strdup(string_buffer_.buffer()));
     string_buffer_.Reset();
   }
 
@@ -167,7 +171,7 @@ bool PPCTranslator::Translate(GuestFunction* function,
   // Stash raw HIR.
   if (debug_info_flags & DebugInfoFlags::kDebugInfoDisasmRawHir) {
     builder_->Dump(&string_buffer_);
-    debug_info->set_raw_hir_disasm(string_buffer_.ToString());
+    debug_info->set_raw_hir_disasm(strdup(string_buffer_.buffer()));
     string_buffer_.Reset();
   }
 
@@ -179,7 +183,7 @@ bool PPCTranslator::Translate(GuestFunction* function,
   // Stash optimized HIR.
   if (debug_info_flags & DebugInfoFlags::kDebugInfoDisasmHir) {
     builder_->Dump(&string_buffer_);
-    debug_info->set_hir_disasm(string_buffer_.ToString());
+    debug_info->set_hir_disasm(strdup(string_buffer_.buffer()));
     string_buffer_.Reset();
   }
 
@@ -197,7 +201,7 @@ void PPCTranslator::DumpSource(GuestFunction* function,
   Memory* memory = frontend_->memory();
 
   string_buffer->AppendFormat(
-      "%s fn %.8X-%.8X %s\n", function->module()->name().c_str(),
+      "{} fn {:08X}-{:08X} {}\n", function->module()->name().c_str(),
       function->address(), function->end_address(), function->name().c_str());
 
   auto blocks = scanner_->FindBlocks(function);
@@ -212,12 +216,12 @@ void PPCTranslator::DumpSource(GuestFunction* function,
 
     // Check labels.
     if (block_it != blocks.end() && block_it->start_address == address) {
-      string_buffer->AppendFormat("%.8X          loc_%.8X:\n", address,
+      string_buffer->AppendFormat("{:08X}          loc_{:08X}:\n", address,
                                   address);
       ++block_it;
     }
 
-    string_buffer->AppendFormat("%.8X %.8X   ", address, code);
+    string_buffer->AppendFormat("{:08X} {:08X}   ", address, code);
     DisasmPPC(address, code, string_buffer);
     string_buffer->Append('\n');
   }

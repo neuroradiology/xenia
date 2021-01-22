@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -11,6 +11,7 @@
 
 #include <sys/mman.h>
 #include <cstdio>
+#include <memory>
 
 #include "xenia/base/string.h"
 
@@ -18,7 +19,7 @@ namespace xe {
 
 class PosixMappedMemory : public MappedMemory {
  public:
-  PosixMappedMemory(const std::wstring& path, Mode mode)
+  PosixMappedMemory(const std::filesystem::path& path, Mode mode)
       : MappedMemory(path, mode), file_handle(nullptr) {}
 
   ~PosixMappedMemory() override {
@@ -33,9 +34,9 @@ class PosixMappedMemory : public MappedMemory {
   FILE* file_handle;
 };
 
-std::unique_ptr<MappedMemory> MappedMemory::Open(const std::wstring& path,
-                                                 Mode mode, size_t offset,
-                                                 size_t length) {
+std::unique_ptr<MappedMemory> MappedMemory::Open(
+    const std::filesystem::path& path, Mode mode, size_t offset,
+    size_t length) {
   const char* mode_str;
   int prot;
   switch (mode) {
@@ -49,9 +50,10 @@ std::unique_ptr<MappedMemory> MappedMemory::Open(const std::wstring& path,
       break;
   }
 
-  auto mm = std::make_unique<PosixMappedMemory>(path, mode);
+  auto mm =
+      std::unique_ptr<PosixMappedMemory>(new PosixMappedMemory(path, mode));
 
-  mm->file_handle = fopen(xe::to_string(path).c_str(), mode_str);
+  mm->file_handle = fopen(path.c_str(), mode_str);
   if (!mm->file_handle) {
     return nullptr;
   }
@@ -72,6 +74,13 @@ std::unique_ptr<MappedMemory> MappedMemory::Open(const std::wstring& path,
   }
 
   return std::move(mm);
+}
+
+std::unique_ptr<ChunkedMappedMemoryWriter> ChunkedMappedMemoryWriter::Open(
+    const std::filesystem::path& path, size_t chunk_size,
+    bool low_address_space) {
+  // TODO(DrChat)
+  return nullptr;
 }
 
 }  // namespace xe

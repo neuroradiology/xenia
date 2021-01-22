@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <thread>
 
 #include "xenia/cpu/processor.h"
@@ -34,6 +35,8 @@ class GraphicsSystem {
  public:
   virtual ~GraphicsSystem();
 
+  virtual std::string name() const = 0;
+
   Memory* memory() const { return memory_; }
   cpu::Processor* processor() const { return processor_; }
   kernel::KernelState* kernel_state() const { return kernel_state_; }
@@ -43,19 +46,25 @@ class GraphicsSystem {
                          kernel::KernelState* kernel_state,
                          ui::Window* target_window);
   virtual void Shutdown();
+  virtual void Reset();
+
+  virtual std::unique_ptr<xe::ui::RawImage> Capture() { return nullptr; }
 
   RegisterFile* register_file() { return &register_file_; }
   CommandProcessor* command_processor() const {
     return command_processor_.get();
   }
 
-  void InitializeRingBuffer(uint32_t ptr, uint32_t page_count);
-  void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size);
+  virtual void InitializeRingBuffer(uint32_t ptr, uint32_t log2_size);
+  virtual void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size);
 
-  void SetInterruptCallback(uint32_t callback, uint32_t user_data);
+  virtual void SetInterruptCallback(uint32_t callback, uint32_t user_data);
   void DispatchInterruptCallback(uint32_t source, uint32_t cpu);
 
   virtual void ClearCaches();
+
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id, bool blocking);
 
   void RequestFrameTrace();
   void BeginTracing();

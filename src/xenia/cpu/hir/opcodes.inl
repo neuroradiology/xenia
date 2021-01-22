@@ -232,6 +232,18 @@ DEFINE_OPCODE(
     OPCODE_FLAG_MEMORY)
 
 DEFINE_OPCODE(
+    OPCODE_LOAD_OFFSET,
+    "load_offset",
+    OPCODE_SIG_V_V_V,
+    OPCODE_FLAG_MEMORY)
+
+DEFINE_OPCODE(
+    OPCODE_STORE_OFFSET,
+    "store_offset",
+    OPCODE_SIG_X_V_V_V,
+    OPCODE_FLAG_MEMORY)
+
+DEFINE_OPCODE(
     OPCODE_LOAD,
     "load",
     OPCODE_SIG_V_V,
@@ -250,8 +262,8 @@ DEFINE_OPCODE(
     OPCODE_FLAG_MEMORY)
 
 DEFINE_OPCODE(
-    OPCODE_PREFETCH,
-    "prefetch",
+    OPCODE_CACHE_CONTROL,
+    "cache_control",
     OPCODE_SIG_X_V_O,
     OPCODE_FLAG_MEMORY)
 
@@ -300,6 +312,12 @@ DEFINE_OPCODE(
 DEFINE_OPCODE(
     OPCODE_IS_FALSE,
     "is_false",
+    OPCODE_SIG_V_V,
+    0)
+
+DEFINE_OPCODE(
+    OPCODE_IS_NAN,
+    "is_nan",
     OPCODE_SIG_V_V,
     0)
 
@@ -471,6 +489,12 @@ DEFINE_OPCODE(
     0)
 
 DEFINE_OPCODE(
+    OPCODE_RECIP,
+    "recip",
+    OPCODE_SIG_V_V,
+    0)
+
+DEFINE_OPCODE(
     OPCODE_POW2,
     "pow2",
     OPCODE_SIG_V_V,
@@ -637,3 +661,9 @@ DEFINE_OPCODE(
     "atomic_compare_exchange",
     OPCODE_SIG_V_V_V_V,
     OPCODE_FLAG_VOLATILE)
+
+DEFINE_OPCODE(
+    OPCODE_SET_ROUNDING_MODE,
+    "set_rounding_mode",
+    OPCODE_SIG_X_V,
+    0)

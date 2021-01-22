@@ -170,6 +170,7 @@ class Value {
     constant.v128 = value;
   }
   void set_from(const Value* other) {
+    assert_true(other->IsConstant());
     type = other->type;
     flags = other->flags;
     constant.v128 = other->constant.v128;
@@ -246,6 +247,29 @@ class Value {
           return !constant.f64;
         case VEC128_TYPE:
           return !constant.v128.low && !constant.v128.high;
+        default:
+          assert_unhandled_case(type);
+          return false;
+      }
+    } else {
+      return false;
+    }
+  }
+  bool IsConstantOne() const {
+    if (flags & VALUE_IS_CONSTANT) {
+      switch (type) {
+        case INT8_TYPE:
+          return constant.i8 == 1;
+        case INT16_TYPE:
+          return constant.i16 == 1;
+        case INT32_TYPE:
+          return constant.i32 == 1;
+        case INT64_TYPE:
+          return constant.i64 == 1;
+        case FLOAT32_TYPE:
+          return constant.f32 == 1.f;
+        case FLOAT64_TYPE:
+          return constant.f64 == 1.0;
         default:
           assert_unhandled_case(type);
           return false;
@@ -487,6 +511,7 @@ class Value {
   void Abs();
   void Sqrt();
   void RSqrt();
+  void Recip();
   void And(Value* other);
   void Or(Value* other);
   void Xor(Value* other);
@@ -499,12 +524,20 @@ class Value {
   void Splat(Value* other);
   void VectorCompareEQ(Value* other, TypeName type);
   void VectorCompareSGT(Value* other, TypeName type);
-  void VectorConvertI2F(Value* other);
-  void VectorConvertF2I(Value* other);
+  void VectorCompareSGE(Value* other, TypeName type);
+  void VectorCompareUGT(Value* other, TypeName type);
+  void VectorCompareUGE(Value* other, TypeName type);
+  void VectorConvertI2F(Value* other, bool is_unsigned);
+  void VectorConvertF2I(Value* other, bool is_unsigned);
   void VectorShl(Value* other, TypeName type);
   void VectorShr(Value* other, TypeName type);
   void VectorRol(Value* other, TypeName type);
+  void VectorAdd(Value* other, TypeName type, bool is_unsigned, bool saturate);
   void VectorSub(Value* other, TypeName type, bool is_unsigned, bool saturate);
+  void DotProduct3(Value* other);
+  void DotProduct4(Value* other);
+  void VectorAverage(Value* other, TypeName type, bool is_unsigned,
+                     bool saturate);
   void ByteSwap();
   void CountLeadingZeros(const Value* other);
   bool Compare(Opcode opcode, Value* other);

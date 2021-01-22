@@ -32,15 +32,18 @@ enum RoundMode {
   ROUND_TO_NEAREST,
   ROUND_TO_MINUS_INFINITY,
   ROUND_TO_POSITIVE_INFINITY,
+  ROUND_DYNAMIC,  // Round based on the host's rounding mode.
 };
 
 enum LoadStoreFlags {
   LOAD_STORE_BYTE_SWAP = 1 << 0,
 };
 
-enum PrefetchFlags {
-  PREFETCH_LOAD = (1 << 1),
-  PREFETCH_STORE = (1 << 2),
+enum CacheControlType {
+  CACHE_CONTROL_TYPE_DATA_TOUCH,
+  CACHE_CONTROL_TYPE_DATA_TOUCH_FOR_STORE,
+  CACHE_CONTROL_TYPE_DATA_STORE,
+  CACHE_CONTROL_TYPE_DATA_STORE_AND_FLUSH,
 };
 
 enum ArithmeticFlags {
@@ -76,18 +79,18 @@ enum PackType : uint16_t {
   // Special types:
   PACK_TYPE_D3DCOLOR = 0,
   PACK_TYPE_FLOAT16_2 = 1,
-  PACK_TYPE_FLOAT16_3 = 2,  // FIXME: Not verified, but looks correct.
+  PACK_TYPE_SHORT_4 = 2,
   PACK_TYPE_FLOAT16_4 = 3,
   PACK_TYPE_SHORT_2 = 4,
   PACK_TYPE_UINT_2101010 = 5,
+  PACK_TYPE_ULONG_4202020 = 6,
 
   // Types which use the bitmasks below for configuration:
-  PACK_TYPE_8_IN_16 = 6,
-  PACK_TYPE_16_IN_32 = 7,
+  PACK_TYPE_8_IN_16 = 7,
+  PACK_TYPE_16_IN_32 = 8,
 
   PACK_TYPE_MODE = 0x000F,  // just to get the mode
-
-  // Unpack to low or high parts.
+                            // Unpack to low or high parts.
   PACK_TYPE_TO_LO = 0 << 12,
   PACK_TYPE_TO_HI = 1 << 12,
 
@@ -140,6 +143,55 @@ enum Opcode {
   OPCODE_TRUNCATE,
   OPCODE_CONVERT,
   OPCODE_ROUND,
+  // Note that 2147483648.0 + (src & 0x7FFFFFFF) is not a correct way of
+  // performing the uint -> float conversion for large numbers on backends where
+  // only sint -> float is available.
+  //
+  // Take 0b11000000000000000000000101000001 as an example,
+  // or 1.1000000000000000000000101000001 * 2^31.
+  // This one has 31 mantissa bits (excluding the implicit 1.), and needs to be
+  // rounded to 23 bits - 8 mantissa bits need to be dropped:
+  // 10000000000000000000001_01000001
+  //
+  // Rounding to the nearest even (the only rounding mode that exists on
+  // AltiVec, and the likely rounding mode in the implementations) should be
+  // done downwards - 01000001 of 1_01000001 is in [00000000, 01111111].
+  // The correct mantissa in this case is:
+  // 1.10000000000000000000001 * 2^31.
+  //
+  // With a two-step conversion, rounding is done twice instead, which gives an
+  // incorrect result.
+  //
+  // First, converting the low 31 bits to float:
+  // The number is 0.1000000000000000000000101000001 * 2^31.
+  // Normalizing it, we get 1.000000000000000000000101000001 (30 significand
+  // bits).
+  // We need to round 30 bits to 23 - 7 bits need to be dropped:
+  // 00000000000000000000010_1000001
+  //
+  // Rounding to the nearest even is done upwards in this case - 1000001 of
+  // 0_1000001 is in [1000001, 1111111].
+  // The result of the sint -> float conversion is:
+  // 1.00000000000000000000011 * 2^30.
+  //
+  // Now 2147483648.0 (1 * 2^31) needs to be added. Aligning the exponents, we
+  // get:
+  //   0.|10000000000000000000001|1 * 2^31
+  // + 1.|00000000000000000000000|  * 2^31
+  // = 1.|10000000000000000000001|1 * 2^31
+  //
+  // At "infinite precision", the result has 24 significand bits, but only 23
+  // can be stored, thus rounding to the nearest even needs to be done. 1_1 is
+  // (odd + 0.5). 0.5 is ambiguous, thus tie-breaking to the nearest even -
+  // which is above in this case - is done. The result is:
+  // 1.10000000000000000000010 * 2^31.
+  //
+  // This is incorrect - larger than the correctly rounded result, which is:
+  // 1.10000000000000000000001 * 2^31.
+  //
+  // Test cases checked on real hardware via vcfux: 0xFFFDFF7E, 0xFFFCFF7D -
+  // should be 0x4F7FFDFF and 0x4F7FFCFF respectively, not 0x4F7FFE00 and
+  // 0x4F7FFD00.
   OPCODE_VECTOR_CONVERT_I2F,
   OPCODE_VECTOR_CONVERT_F2I,
   OPCODE_LOAD_VECTOR_SHL,
@@ -152,10 +204,12 @@ enum Opcode {
   OPCODE_CONTEXT_BARRIER,
   OPCODE_LOAD_MMIO,
   OPCODE_STORE_MMIO,
+  OPCODE_LOAD_OFFSET,
+  OPCODE_STORE_OFFSET,
   OPCODE_LOAD,
   OPCODE_STORE,
   OPCODE_MEMSET,
-  OPCODE_PREFETCH,
+  OPCODE_CACHE_CONTROL,
   OPCODE_MEMORY_BARRIER,
   OPCODE_MAX,
   OPCODE_VECTOR_MAX,
@@ -164,6 +218,7 @@ enum Opcode {
   OPCODE_SELECT,
   OPCODE_IS_TRUE,
   OPCODE_IS_FALSE,
+  OPCODE_IS_NAN,
   OPCODE_COMPARE_EQ,
   OPCODE_COMPARE_NE,
   OPCODE_COMPARE_SLT,
@@ -194,6 +249,7 @@ enum Opcode {
   OPCODE_ABS,
   OPCODE_SQRT,
   OPCODE_RSQRT,
+  OPCODE_RECIP,
   OPCODE_POW2,
   OPCODE_LOG2,
   OPCODE_DOT_PRODUCT_3,
@@ -222,6 +278,7 @@ enum Opcode {
   OPCODE_UNPACK,
   OPCODE_ATOMIC_EXCHANGE,
   OPCODE_ATOMIC_COMPARE_EXCHANGE,
+  OPCODE_SET_ROUNDING_MODE,
   __OPCODE_MAX_VALUE,  // Keep at end.
 };
 

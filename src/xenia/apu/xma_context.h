@@ -25,7 +25,7 @@
 
 // Helpful resources:
 // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
-// http://hcs64.com/mboard/forum.php?showthread=14818
+// https://hcs64.com/mboard/forum.php?showthread=14818
 // https://github.com/hrydgard/minidx9/blob/master/Include/xma2defs.h
 
 // Forward declarations
@@ -41,7 +41,7 @@ namespace apu {
 // We load and swap the whole thing to splat here so that we can
 // use bitfields.
 // This could be important:
-// http://www.fmod.org/questions/question/forum-15859
+// https://www.fmod.org/questions/question/forum-15859
 // Appears to be dumped in order (for the most part)
 
 struct XMA_CONTEXT_DATA {
@@ -65,12 +65,12 @@ struct XMA_CONTEXT_DATA {
   uint32_t loop_subframe_end : 3;             // +14bit, XMASetLoopData
   uint32_t loop_subframe_skip : 3;            // +17bit, XMASetLoopData might be
                                               // subframe_decode_count
-  uint32_t subframe_decode_count : 4;  // +20bit might be subframe_skip_count
-  uint32_t unk_dword_1_b : 3;          // ? NumSubframesToSkip/NumChannels(?)
-  uint32_t sample_rate : 2;            // +27bit enum of sample rates
-  uint32_t is_stereo : 1;              // +29bit
-  uint32_t unk_dword_1_c : 1;          // +30bit
-  uint32_t output_buffer_valid : 1;    // +31bit, XMAIsOutputBufferValid
+  uint32_t subframe_decode_count : 4;         // +20bit
+  uint32_t subframe_skip_count : 3;           // +24bit
+  uint32_t sample_rate : 2;                   // +27bit enum of sample rates
+  uint32_t is_stereo : 1;                     // +29bit
+  uint32_t unk_dword_1_c : 1;                 // +30bit
+  uint32_t output_buffer_valid : 1;           // +31bit, XMAIsOutputBufferValid
 
   // DWORD 2
   uint32_t input_buffer_read_offset : 26;  // XMAGetInputBufferReadOffset
@@ -99,7 +99,9 @@ struct XMA_CONTEXT_DATA {
   // DWORD 9
   // +0bit, XMAGetOutputBufferReadOffset AKA WriteBufferOffsetRead
   uint32_t output_buffer_read_offset : 5;
-  uint32_t unk_dword_9 : 27;  // StopWhenDone/InterruptWhenDone(?)
+  uint32_t : 25;
+  uint32_t stop_when_done : 1;       // +30bit
+  uint32_t interrupt_when_done : 1;  // +31bit
 
   // DWORD 10-15
   uint32_t unk_dwords_10_15[6];  // reserved?
@@ -147,7 +149,7 @@ class XmaContext {
   ~XmaContext();
 
   int Setup(uint32_t id, Memory* memory, uint32_t guest_ptr);
-  void Work();
+  bool Work();
 
   void Enable();
   bool Block(bool poll);

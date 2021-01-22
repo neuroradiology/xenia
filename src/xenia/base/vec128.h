@@ -91,6 +91,7 @@ typedef struct alignas(16) vec128_s {
       uint32_t uw;
     };
     float f32[4];
+    double f64[2];
     int8_t i8[16];
     uint8_t u8[16];
     int16_t i16[8];
@@ -170,6 +171,32 @@ static inline vec128_t vec128i(uint32_t x, uint32_t y, uint32_t z, uint32_t w) {
   v.u32[3] = w;
   return v;
 }
+static inline vec128_t vec128q(uint64_t src) {
+  vec128_t v;
+  for (auto i = 0; i < 2; ++i) {
+    v.i64[i] = src;
+  }
+  return v;
+}
+static inline vec128_t vec128q(uint64_t x, uint64_t y) {
+  vec128_t v;
+  v.i64[0] = x;
+  v.i64[1] = y;
+  return v;
+}
+static inline vec128_t vec128d(double src) {
+  vec128_t v;
+  for (auto i = 0; i < 2; ++i) {
+    v.f64[i] = src;
+  }
+  return v;
+}
+static inline vec128_t vec128d(double x, double y) {
+  vec128_t v;
+  v.f64[0] = x;
+  v.f64[1] = y;
+  return v;
+}
 static inline vec128_t vec128f(float src) {
   vec128_t v;
   for (auto i = 0; i < 4; ++i) {
@@ -237,12 +264,10 @@ static inline vec128_t vec128b(uint8_t x0, uint8_t x1, uint8_t x2, uint8_t x3,
   return v;
 }
 
-inline std::string to_string(const vec128_t& value) {
-  char buffer[128];
-  std::snprintf(buffer, sizeof(buffer), "(%g, %g, %g, %g)", value.x, value.y,
-                value.z, value.w);
-  return std::string(buffer);
-}
+// TODO(gibbed): Figure out why clang doesn't line forward declarations of
+// inline functions.
+
+std::string to_string(const vec128_t& value);
 
 }  // namespace xe
 

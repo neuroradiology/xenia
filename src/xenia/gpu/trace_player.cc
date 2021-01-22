@@ -11,6 +11,7 @@
 
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
+#include "xenia/gpu/xenos.h"
 #include "xenia/memory.h"
 
 namespace xe {
@@ -21,18 +22,18 @@ TracePlayer::TracePlayer(xe::ui::Loop* loop, GraphicsSystem* graphics_system)
       graphics_system_(graphics_system),
       current_frame_index_(0),
       current_command_index_(-1) {
-  // Need to allocate all of physical memory so that we can write to it
-  // during playback.
-  graphics_system_->memory()
-      ->LookupHeapByType(true, 4096)
-      ->AllocFixed(0, 0x1FFFFFFF, 4096,
+  // Need to allocate all of physical memory so that we can write to it during
+  // playback. The 64 KB page heap is larger, covers the entire physical memory,
+  // so it is used instead of the 4 KB page one.
+  auto heap = graphics_system_->memory()->LookupHeapByType(true, 64 * 1024);
+  heap->AllocFixed(heap->heap_base(), heap->heap_size(), heap->page_size(),
                    kMemoryAllocationReserve | kMemoryAllocationCommit,
                    kMemoryProtectRead | kMemoryProtectWrite);
 
   playback_event_ = xe::threading::Event::CreateAutoResetEvent(false);
 }
 
-TracePlayer::~TracePlayer() = default;
+TracePlayer::~TracePlayer() { delete[] edram_snapshot_; }
 
 const TraceReader::Frame* TracePlayer::current_frame() const {
   if (current_frame_index_ >= frame_count()) {
@@ -51,7 +52,7 @@ void TracePlayer::SeekFrame(int target_frame) {
 
   assert_true(frame->start_ptr <= frame->end_ptr);
   PlayTrace(frame->start_ptr, frame->end_ptr - frame->start_ptr,
-            TracePlaybackMode::kBreakOnSwap);
+            TracePlaybackMode::kBreakOnSwap, false);
 }
 
 void TracePlayer::SeekCommand(int target_command) {
@@ -71,11 +72,11 @@ void TracePlayer::SeekCommand(int target_command) {
     const auto& previous_command = frame->commands[previous_command_index];
     PlayTrace(previous_command.end_ptr,
               command.end_ptr - previous_command.end_ptr,
-              TracePlaybackMode::kBreakOnSwap);
+              TracePlaybackMode::kBreakOnSwap, false);
   } else {
     // Full playback from frame start.
     PlayTrace(frame->start_ptr, command.end_ptr - frame->start_ptr,
-              TracePlaybackMode::kBreakOnSwap);
+              TracePlaybackMode::kBreakOnSwap, true);
   }
 }
 
@@ -84,18 +85,24 @@ void TracePlayer::WaitOnPlayback() {
 }
 
 void TracePlayer::PlayTrace(const uint8_t* trace_data, size_t trace_size,
-                            TracePlaybackMode playback_mode) {
-  graphics_system_->command_processor()->CallInThread(
-      [this, trace_data, trace_size, playback_mode]() {
-        PlayTraceOnThread(trace_data, trace_size, playback_mode);
-      });
+                            TracePlaybackMode playback_mode,
+                            bool clear_caches) {
+  playing_trace_ = true;
+  graphics_system_->command_processor()->CallInThread([=]() {
+    PlayTraceOnThread(trace_data, trace_size, playback_mode, clear_caches);
+  });
 }
 
 void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
                                     size_t trace_size,
-                                    TracePlaybackMode playback_mode) {
+                                    TracePlaybackMode playback_mode,
+                                    bool clear_caches) {
   auto memory = graphics_system_->memory();
   auto command_processor = graphics_system_->command_processor();
+
+  if (clear_caches) {
+    command_processor->ClearCaches();
+  }
 
   command_processor->set_swap_mode(SwapMode::kIgnored);
   playback_percent_ = 0;
@@ -168,13 +175,28 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
                          memory->TranslatePhysical(cmd->base_ptr),
                          cmd->decoded_length);
         trace_ptr += cmd->encoded_length;
+        command_processor->TracePlaybackWroteMemory(cmd->base_ptr,
+                                                    cmd->decoded_length);
         break;
       }
       case TraceCommandType::kMemoryWrite: {
         auto cmd = reinterpret_cast<const MemoryCommand*>(trace_ptr);
         trace_ptr += sizeof(*cmd);
         // ?
+        // Assuming the command processor will do the same write.
         trace_ptr += cmd->encoded_length;
+        break;
+      }
+      case TraceCommandType::kEdramSnapshot: {
+        auto cmd = reinterpret_cast<const EdramSnapshotCommand*>(trace_ptr);
+        trace_ptr += sizeof(*cmd);
+        if (!edram_snapshot_) {
+          edram_snapshot_ = new uint8_t[xenos::kEdramSizeBytes];
+        }
+        DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
+                         edram_snapshot_, xenos::kEdramSizeBytes);
+        trace_ptr += cmd->encoded_length;
+        command_processor->RestoreEdramSnapshot(edram_snapshot_);
         break;
       }
       case TraceCommandType::kEvent: {

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -19,7 +19,9 @@
 // NOTE: ordering matters here as sometimes multiple flags are defined on
 // certain platforms.
 //
-// Great resource on predefined macros: http://predef.sourceforge.net/preos.html
+// Great resource on predefined macros:
+// https://sourceforge.net/p/predef/wiki/OperatingSystems/
+// Original link: https://predef.sourceforge.net/preos.html
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -29,8 +31,14 @@
 #define XE_PLATFORM_MAC 1
 #elif defined(WIN32) || defined(_WIN32)
 #define XE_PLATFORM_WIN32 1
-#else
+#elif defined(__ANDROID__)
+#define XE_PLATFORM_ANDROID 1
 #define XE_PLATFORM_LINUX 1
+#elif defined(__gnu_linux__)
+#define XE_PLATFORM_GNU_LINUX 1
+#define XE_PLATFORM_LINUX 1
+#else
+#error Unsupported target OS.
 #endif
 
 #if defined(__clang__)
@@ -47,6 +55,17 @@
 #define XE_COMPILER_UNKNOWN 1
 #endif
 
+#if defined(_M_AMD64) || defined(__amd64__)
+#define XE_ARCH_AMD64 1
+#elif defined(_M_ARM64) || defined(__aarch64__)
+#define XE_ARCH_ARM64 1
+#elif defined(_M_IX86) || defined(__i386__) || defined(_M_ARM) || \
+    defined(__arm__)
+#error Xenia is not supported on 32-bit platforms.
+#elif defined(_M_PPC) || defined(__powerpc__)
+#define XE_ARCH_PPC 1
+#endif
+
 #if XE_PLATFORM_WIN32
 #define strdup _strdup
 #define strcasecmp _stricmp
@@ -57,7 +76,7 @@
 
 #if XE_PLATFORM_WIN32
 #include <intrin.h>
-#else
+#elif XE_ARCH_AMD64
 #include <x86intrin.h>
 #endif  // XE_PLATFORM_WIN32
 
@@ -65,20 +84,28 @@
 #include <libkern/OSByteOrder.h>
 #endif  // XE_PLATFORM_MAC
 
+#if XE_COMPILER_MSVC
+#define XEPACKEDSTRUCT(name, value) \
+  __pragma(pack(push, 1)) struct name value __pragma(pack(pop));
+#define XEPACKEDSTRUCTANONYMOUS(value) \
+  __pragma(pack(push, 1)) struct value __pragma(pack(pop));
+#define XEPACKEDUNION(name, value) \
+  __pragma(pack(push, 1)) union name value __pragma(pack(pop));
+#else
+#define XEPACKEDSTRUCT(name, value) struct __attribute__((packed)) name value;
+#define XEPACKEDSTRUCTANONYMOUS(value) struct __attribute__((packed)) value;
+#define XEPACKEDUNION(name, value) union __attribute__((packed)) name value;
+#endif  // XE_PLATFORM_WIN32
+
 namespace xe {
 
 #if XE_PLATFORM_WIN32
 const char kPathSeparator = '\\';
-const wchar_t kWPathSeparator = L'\\';
-const size_t kMaxPath = 260;  // _MAX_PATH
 #else
 const char kPathSeparator = '/';
-const wchar_t kWPathSeparator = L'/';
-const size_t kMaxPath = 1024;  // PATH_MAX
 #endif  // XE_PLATFORM_WIN32
 
-// Launches a web browser to the given URL.
-void LaunchBrowser(const char* url);
+const char kGuestPathSeparator = '\\';
 
 }  // namespace xe
 

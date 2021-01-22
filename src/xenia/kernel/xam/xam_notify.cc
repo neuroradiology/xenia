@@ -9,55 +9,61 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
-#include "xenia/kernel/notify_listener.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xnotifylistener.h"
 #include "xenia/xbox.h"
 
 namespace xe {
 namespace kernel {
 namespace xam {
 
-SHIM_CALL XamNotifyCreateListener_shim(PPCContext* ppc_context,
-                                       KernelState* kernel_state) {
-  uint64_t mask = SHIM_GET_ARG_64(0);
-  uint32_t one = SHIM_GET_ARG_32(1);
+uint32_t xeXamNotifyCreateListener(uint64_t mask, uint32_t is_system,
+                                   uint32_t max_version) {
+  assert_true(max_version < 11);
 
-  XELOGD("XamNotifyCreateListener(%.8llX, %d)", mask, one);
+  if (max_version > 10) {
+    max_version = 10;
+  }
 
-  // r4=1 may indicate user process?
-
-  auto listener = object_ref<NotifyListener>(new NotifyListener(kernel_state));
-  listener->Initialize(mask);
+  auto listener =
+      object_ref<XNotifyListener>(new XNotifyListener(kernel_state()));
+  listener->Initialize(mask, max_version);
 
   // Handle ref is incremented, so return that.
   uint32_t handle = listener->handle();
 
-  SHIM_SET_RETURN_32(handle);
+  return handle;
 }
 
-// http://ffplay360.googlecode.com/svn/Test/Common/AtgSignIn.cpp
-SHIM_CALL XNotifyGetNext_shim(PPCContext* ppc_context,
-                              KernelState* kernel_state) {
-  uint32_t handle = SHIM_GET_ARG_32(0);
-  uint32_t match_id = SHIM_GET_ARG_32(1);
-  uint32_t id_ptr = SHIM_GET_ARG_32(2);
-  uint32_t param_ptr = SHIM_GET_ARG_32(3);
+dword_result_t XamNotifyCreateListener(qword_t mask, dword_t max_version) {
+  return xeXamNotifyCreateListener(mask, 0, max_version);
+}
+DECLARE_XAM_EXPORT1(XamNotifyCreateListener, kNone, kImplemented);
 
-  XELOGD("XNotifyGetNext(%.8X, %.8X, %.8X, %.8X)", handle, match_id, id_ptr,
-         param_ptr);
+dword_result_t XamNotifyCreateListenerInternal(qword_t mask, dword_t is_system,
+                                               dword_t max_version) {
+  return xeXamNotifyCreateListener(mask, is_system, max_version);
+}
+DECLARE_XAM_EXPORT1(XamNotifyCreateListenerInternal, kNone, kImplemented);
 
-  if (!handle) {
-    SHIM_SET_RETURN_32(0);
-    return;
+// https://github.com/CodeAsm/ffplay360/blob/master/Common/AtgSignIn.cpp
+dword_result_t XNotifyGetNext(dword_t handle, dword_t match_id,
+                              lpdword_t id_ptr, lpdword_t param_ptr) {
+  if (param_ptr) {
+    *param_ptr = 0;
   }
+
+  if (!id_ptr) {
+    return 0;
+  }
+  *id_ptr = 0;
 
   // Grab listener.
   auto listener =
-      kernel_state->object_table()->LookupObject<NotifyListener>(handle);
+      kernel_state()->object_table()->LookupObject<XNotifyListener>(handle);
   if (!listener) {
-    SHIM_SET_RETURN_32(0);
-    return;
+    return 0;
   }
 
   bool dequeued = false;
@@ -72,43 +78,30 @@ SHIM_CALL XNotifyGetNext_shim(PPCContext* ppc_context,
     dequeued = listener->DequeueNotification(&id, &param);
   }
 
-  if (dequeued) {
-    SHIM_SET_MEM_32(id_ptr, id);
-    SHIM_SET_MEM_32(param_ptr, param);
-  } else {
-    SHIM_SET_MEM_32(id_ptr, 0);
-    SHIM_SET_MEM_32(param_ptr, 0);
+  *id_ptr = dequeued ? id : 0;
+  // param_ptr may be null - Ghost Recon Advanced Warfighter 2 Demo explicitly
+  // passes nullptr in the code.
+  // https://github.com/xenia-project/xenia/pull/1577
+  if (param_ptr) {
+    *param_ptr = dequeued ? param : 0;
   }
-
-  SHIM_SET_RETURN_32(dequeued ? 1 : 0);
+  return dequeued ? 1 : 0;
 }
+DECLARE_XAM_EXPORT2(XNotifyGetNext, kNone, kImplemented, kHighFrequency);
 
-SHIM_CALL XNotifyDelayUI_shim(PPCContext* ppc_context,
-                              KernelState* kernel_state) {
-  uint32_t delay_ms = SHIM_GET_ARG_32(0);
-
-  XELOGD("XNotifyDelayUI(%d)", delay_ms);
-
+dword_result_t XNotifyDelayUI(dword_t delay_ms) {
   // Ignored.
-  SHIM_SET_RETURN_32(0);
+  return 0;
 }
+DECLARE_XAM_EXPORT1(XNotifyDelayUI, kNone, kStub);
 
-SHIM_CALL XNotifyPositionUI_shim(PPCContext* ppc_context,
-                                 KernelState* kernel_state) {
-  uint32_t position = SHIM_GET_ARG_32(0);
-
-  XELOGD("XNotifyPositionUI(%.8X)", position);
-
+void XNotifyPositionUI(dword_t position) {
   // Ignored.
 }
+DECLARE_XAM_EXPORT1(XNotifyPositionUI, kNone, kStub);
 
 void RegisterNotifyExports(xe::cpu::ExportResolver* export_resolver,
-                           KernelState* kernel_state) {
-  SHIM_SET_MAPPING("xam.xex", XamNotifyCreateListener, state);
-  SHIM_SET_MAPPING("xam.xex", XNotifyGetNext, state);
-  SHIM_SET_MAPPING("xam.xex", XNotifyDelayUI, state);
-  SHIM_SET_MAPPING("xam.xex", XNotifyPositionUI, state);
-}
+                           KernelState* kernel_state) {}
 
 }  // namespace xam
 }  // namespace kernel

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -13,6 +13,7 @@
 #include <functional>
 #include <string>
 
+#include "xenia/base/delegate.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/memory.h"
@@ -46,14 +47,32 @@ namespace xe {
 // This is responsible for initializing and managing all the various subsystems.
 class Emulator {
  public:
-  explicit Emulator(const std::wstring& command_line);
+  explicit Emulator(const std::filesystem::path& command_line,
+                    const std::filesystem::path& storage_root,
+                    const std::filesystem::path& content_root,
+                    const std::filesystem::path& cache_root);
   ~Emulator();
 
   // Full command line used when launching the process.
-  const std::wstring& command_line() const { return command_line_; }
+  const std::filesystem::path& command_line() const { return command_line_; }
+
+  // Folder persistent internal emulator data is stored in.
+  const std::filesystem::path& storage_root() const { return storage_root_; }
+
+  // Folder guest content is stored in.
+  const std::filesystem::path& content_root() const { return content_root_; }
+
+  // Folder files safe to remove without significant side effects are stored in.
+  const std::filesystem::path& cache_root() const { return cache_root_; }
 
   // Title of the game in the default language.
-  const std::wstring& game_title() const { return game_title_; }
+  const std::string& game_title() const { return game_title_; }
+
+  // Currently running title ID
+  uint32_t title_id() const { return title_id_; }
+
+  // Are we currently running a title?
+  bool is_title_open() const { return title_id_ != 0; }
 
   // Window used for displaying graphical output.
   ui::Window* display_window() const { return display_window_; }
@@ -102,41 +121,58 @@ class Emulator {
       std::function<std::vector<std::unique_ptr<hid::InputDriver>>(ui::Window*)>
           input_driver_factory);
 
+  // Terminates the currently running title.
+  X_STATUS TerminateTitle();
+
   // Launches a game from the given file path.
   // This will attempt to infer the type of the given file (such as an iso, etc)
   // using heuristics.
-  X_STATUS LaunchPath(std::wstring path, std::function<void()> on_launch);
+  X_STATUS LaunchPath(const std::filesystem::path& path);
 
   // Launches a game from a .xex file by mounting the containing folder as if it
   // was an extracted STFS container.
-  X_STATUS LaunchXexFile(std::wstring path, std::function<void()> on_launch);
+  X_STATUS LaunchXexFile(const std::filesystem::path& path);
 
   // Launches a game from a disc image file (.iso, etc).
-  X_STATUS LaunchDiscImage(std::wstring path, std::function<void()> on_launch);
+  X_STATUS LaunchDiscImage(const std::filesystem::path& path);
 
   // Launches a game from an STFS container file.
-  X_STATUS LaunchStfsContainer(std::wstring path,
-                               std::function<void()> on_launch);
+  X_STATUS LaunchStfsContainer(const std::filesystem::path& path);
 
   void Pause();
   void Resume();
   bool is_paused() const { return paused_; }
 
-  bool SaveToFile(const std::wstring& path);
-  bool RestoreFromFile(const std::wstring& path);
+  bool SaveToFile(const std::filesystem::path& path);
+  bool RestoreFromFile(const std::filesystem::path& path);
+
+  // The game can request another title to be loaded.
+  bool TitleRequested();
+  void LaunchNextTitle();
 
   void WaitUntilExit();
+
+ public:
+  xe::Delegate<uint32_t, const std::string_view> on_launch;
+  xe::Delegate<bool> on_shader_storage_initialization;
+  xe::Delegate<> on_terminate;
+  xe::Delegate<> on_exit;
 
  private:
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
   bool ExceptionCallback(Exception* ex);
 
-  X_STATUS CompleteLaunch(const std::wstring& path,
-                          const std::string& module_path,
-                          std::function<void()> on_launch);
+  std::string FindLaunchModule();
 
-  std::wstring command_line_;
-  std::wstring game_title_;
+  X_STATUS CompleteLaunch(const std::filesystem::path& path,
+                          const std::string_view module_path);
+
+  std::filesystem::path command_line_;
+  std::filesystem::path storage_root_;
+  std::filesystem::path content_root_;
+  std::filesystem::path cache_root_;
+
+  std::string game_title_;
 
   ui::Window* display_window_;
 
@@ -151,10 +187,11 @@ class Emulator {
   std::unique_ptr<vfs::VirtualFileSystem> file_system_;
 
   std::unique_ptr<kernel::KernelState> kernel_state_;
-  threading::Thread* main_thread_ = nullptr;
+  kernel::object_ref<kernel::XThread> main_thread_;
+  uint32_t title_id_;  // Currently running title ID
 
-  bool paused_ = false;
-  bool restoring_ = false;
+  bool paused_;
+  bool restoring_;
   threading::Fence restore_fence_;  // Fired on restore finish.
 };
 

@@ -1,19 +1,39 @@
 # GPU Documentation
 
+## The Xenos Chip
+
+The [Xenos](https://en.wikipedia.org/wiki/Xenos_\(graphics_chip\)) is a graphics
+chip designed by AMD based off of the R5xx architecture.
+
+### Command Processing
+
+The Xenos runs commands supplied to it directly by the DirectX bare-bones driver
+via a ringbuffer located in system memory.
+
+The bulk of the command processing code is located at
+[src/xenia/gpu/command_processor.cc](../src/xenia/gpu/command_processor.cc)
+
+### EDRAM
+
+The Xenos uses special high-speed memory located on the same die as the chip to 
+store framebuffers/render targets.
+
+TODO: More documentation
+
 ## Options
 
 ### General
 
-See the top of [src/xenia/gpu/gpu.cc](https://github.com/benvanik/xenia/blob/master/src/xenia/gpu/gpu.cc).
+See the top of [src/xenia/gpu/gpu_flags.cc](../src/xenia/gpu/gpu_flags.cc).
 
 `--vsync=false` will attempt to render the game as fast as possible instead of
 waiting for a fixed 60hz timer.
 
-### OpenGL
+### Vulkan
 
-See the top of [src/xenia/gpu/gl4/gl4_gpu.cc](https://github.com/benvanik/xenia/blob/master/src/xenia/gpu/gl4/gl4_gpu.cc).
+See the top of [src/xenia/gpu/vulkan/vulkan_gpu_flags.cc](../src/xenia/gpu/vulkan/vulkan_gpu_flags.cc).
 
-Buggy GL implementations can benefit from `--thread_safe_gl`.
+`vulkan_dump_disasm=true` "Dump shader disassembly. NVIDIA only supported."
 
 ## Tools
 
@@ -42,7 +62,7 @@ Playground tool.
 
 #### Shader Playground
 
-Built separately (for now) under [tools/shader-playground/](https://github.com/benvanik/xenia/blob/master/tools/shader-playground/)
+Built separately (for now) under [tools/shader-playground/](../tools/shader-playground/)
 is a GUI for interactive shader assembly, disassembly, validation, and
 translation.
 
@@ -59,7 +79,7 @@ disassembly is broken. Finally, the right most box will show the
 translated shader in the desired format.
 
 For more information and setup instructions see
-[tools/shader-playground/README.md](https://github.com/benvanik/xenia/blob/master/tools/shader-playground/README.md).
+[tools/shader-playground/README.md](../tools/shader-playground/README.md).
 
 ### xe-gpu-trace-viewer
 
@@ -95,8 +115,93 @@ you to seek through them in the trace viewer. These files will get large.
 
 ### Command Buffer/Registers
 
+Registers documented at [src/xenia/gpu/register_table.inc](../src/xenia/gpu/register_table.inc).
+
+PM4 commands documented at [src/xenia/gpu/xenos.h](../src/xenia/gpu/xenos.h#L521).
+
+#### Performance Counters that may be read back by D3D
+
+They are 64-bit values and have a high and low 32-bit register as well as a `SELECT` register each:
+
+- CP_PERFCOUNTER0
+
+- RBBM_PERFCOUNTER0
+- RBBM_PERFCOUNTER1
+
+- SQ_PERFCOUNTER0
+- SQ_PERFCOUNTER1
+- SQ_PERFCOUNTER2
+- SQ_PERFCOUNTER3
+
+- VGT_PERFCOUNTER0
+- VGT_PERFCOUNTER1
+- VGT_PERFCOUNTER2
+- VGT_PERFCOUNTER3
+
+- VC_PERFCOUNTER0
+- VC_PERFCOUNTER1
+- VC_PERFCOUNTER2
+- VC_PERFCOUNTER3
+
+- PA_SU_PERFCOUNTER0
+- PA_SU_PERFCOUNTER1
+- PA_SU_PERFCOUNTER2
+- PA_SU_PERFCOUNTER3
+
+- PA_SC_PERFCOUNTER0
+- PA_SC_PERFCOUNTER1
+- PA_SC_PERFCOUNTER2
+- PA_SC_PERFCOUNTER3
+
+- HZ_PERFCOUNTER0
+- HZ_PERFCOUNTER1
+
+- TCR_PERFCOUNTER0
+- TCR_PERFCOUNTER1
+
+- TCM_PERFCOUNTER0
+- TCM_PERFCOUNTER1
+
+- TCF_PERFCOUNTER0
+- TCF_PERFCOUNTER1
+- TCF_PERFCOUNTER2
+- TCF_PERFCOUNTER3
+- TCF_PERFCOUNTER4
+- TCF_PERFCOUNTER5
+- TCF_PERFCOUNTER6
+- TCF_PERFCOUNTER7
+- TCF_PERFCOUNTER8
+- TCF_PERFCOUNTER9
+- TCF_PERFCOUNTER10
+- TCF_PERFCOUNTER11
+
+- TP0_PERFCOUNTER0
+- TP0_PERFCOUNTER1
+- TP1_PERFCOUNTER0
+- TP1_PERFCOUNTER1
+- TP2_PERFCOUNTER0
+- TP2_PERFCOUNTER1
+- TP3_PERFCOUNTER0
+- TP3_PERFCOUNTER1
+
+- SX_PERFCOUNTER0
+
+- BC_PERFCOUNTER0
+- BC_PERFCOUNTER1
+- BC_PERFCOUNTER2
+- BC_PERFCOUNTER3
+
+- MC0_PERFCOUNTER0
+- MC1_PERFCOUNTER0
+
+- MH_PERFCOUNTER0
+- MH_PERFCOUNTER1
+- MH_PERFCOUNTER2
+
+- BIF_PERFCOUNTER0
+
 ### Shaders
 
-* [LLVM R600 Tables](https://llvm.org/viewvc/llvm-project/llvm/trunk/lib/Target/R600/R600Instructions.td)
+* [LLVM R600 Tables](https://llvm.org/viewvc/llvm-project/llvm/trunk/lib/Target/AMDGPU/R600Instructions.td)
 ** The opcode formats don't match, but the name->psuedo code is correct.
 * [xemit](https://github.com/gligli/libxemit/blob/master/xemitops.c)

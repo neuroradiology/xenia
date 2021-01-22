@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2019 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -22,6 +22,7 @@
 
 // NOTE: must be included last as it expects windows.h to already be included.
 #include "third_party/xbyak/xbyak/xbyak.h"
+#include "third_party/xbyak/xbyak/xbyak_bin2hex.h"
 #include "third_party/xbyak/xbyak/xbyak_util.h"
 
 namespace xe {
@@ -37,6 +38,8 @@ namespace x64 {
 
 class X64Backend;
 class X64CodeCache;
+
+struct EmitFunctionInfo;
 
 enum RegisterFlags {
   REG_DEST = (1 << 0),
@@ -54,6 +57,7 @@ enum XmmConst {
   XMMNormalizeX16Y16,
   XMM0001,
   XMM3301,
+  XMM3331,
   XMM3333,
   XMMSignMaskPS,
   XMMSignMaskPD,
@@ -70,10 +74,26 @@ enum XmmConst {
   XMMUnpackFLOAT16_2,
   XMMPackFLOAT16_4,
   XMMUnpackFLOAT16_4,
-  XMMPackSHORT_2Min,
-  XMMPackSHORT_2Max,
+  XMMPackSHORT_Min,
+  XMMPackSHORT_Max,
   XMMPackSHORT_2,
+  XMMPackSHORT_4,
   XMMUnpackSHORT_2,
+  XMMUnpackSHORT_4,
+  XMMUnpackSHORT_Overflow,
+  XMMPackUINT_2101010_MinUnpacked,
+  XMMPackUINT_2101010_MaxUnpacked,
+  XMMPackUINT_2101010_MaskUnpacked,
+  XMMPackUINT_2101010_MaskPacked,
+  XMMPackUINT_2101010_Shift,
+  XMMUnpackUINT_2101010_Overflow,
+  XMMPackULONG_4202020_MinUnpacked,
+  XMMPackULONG_4202020_MaxUnpacked,
+  XMMPackULONG_4202020_MaskUnpacked,
+  XMMPackULONG_4202020_PermuteXZ,
+  XMMPackULONG_4202020_PermuteYW,
+  XMMUnpackULONG_4202020_Permute,
+  XMMUnpackULONG_4202020_Overflow,
   XMMOneOver255,
   XMMMaskEvenPI16,
   XMMShiftMaskEvenPI16,
@@ -89,6 +109,13 @@ enum XmmConst {
   XMMSignMaskF32,
   XMMShortMinPS,
   XMMShortMaxPS,
+  XMMIntMin,
+  XMMIntMax,
+  XMMIntMaxPD,
+  XMMPosIntMinPS,
+  XMMQNaN,
+  XMMInt127,
+  XMM2To32,
 };
 
 // Unfortunately due to the design of xbyak we have to pass this to the ctor.
@@ -114,21 +141,22 @@ class X64Emitter : public Xbyak::CodeGenerator {
   Processor* processor() const { return processor_; }
   X64Backend* backend() const { return backend_; }
 
+  static uintptr_t PlaceConstData();
+  static void FreeConstData(uintptr_t data);
+
   bool Emit(GuestFunction* function, hir::HIRBuilder* builder,
             uint32_t debug_info_flags, FunctionDebugInfo* debug_info,
             void** out_code_address, size_t* out_code_size,
             std::vector<SourceMapEntry>* out_source_map);
 
-  static uint32_t PlaceData(Memory* memory);
-
  public:
-  // Reserved:  rsp
+  // Reserved:  rsp, rsi, rdi
   // Scratch:   rax/rcx/rdx
-  //            xmm0-2 (could be only xmm0 with some trickery)
-  // Available: rbx, r12-r15 (save to get r8-r11, rbp, rsi, rdi?)
-  //            xmm6-xmm15 (save to get xmm3-xmm5)
-  static const int GPR_COUNT = 5;
-  static const int XMM_COUNT = 10;
+  //            xmm0-2
+  // Available: rbx, r10-r15
+  //            xmm4-xmm15 (save to get xmm3)
+  static const int GPR_COUNT = 7;
+  static const int XMM_COUNT = 12;
 
   static void SetupReg(const hir::Value* v, Xbyak::Reg8& r) {
     auto idx = gpr_reg_map_[v->reg.index];
@@ -169,12 +197,15 @@ class X64Emitter : public Xbyak::CodeGenerator {
                   uint64_t arg0);
   void CallNativeSafe(void* fn);
   void SetReturnAddress(uint64_t value);
-  void ReloadECX();
-  void ReloadEDX();
+
+  Xbyak::Reg64 GetNativeParam(uint32_t param);
+
+  Xbyak::Reg64 GetContextReg();
+  Xbyak::Reg64 GetMembaseReg();
+  void ReloadContext();
+  void ReloadMembase();
 
   void nop(size_t length = 1);
-
-  // TODO(benvanik): Label for epilog (don't use strings).
 
   // Moves a 64bit immediate into memory.
   bool ConstantFitsIn32Reg(uint64_t v);
@@ -185,6 +216,9 @@ class X64Emitter : public Xbyak::CodeGenerator {
   void LoadConstantXmm(Xbyak::Xmm dest, double v);
   void LoadConstantXmm(Xbyak::Xmm dest, const vec128_t& v);
   Xbyak::Address StashXmm(int index, const Xbyak::Xmm& r);
+  Xbyak::Address StashConstantXmm(int index, float v);
+  Xbyak::Address StashConstantXmm(int index, double v);
+  Xbyak::Address StashConstantXmm(int index, const vec128_t& v);
 
   bool IsFeatureEnabled(uint32_t feature_flag) const {
     return (feature_flags_ & feature_flag) != 0;
@@ -195,8 +229,9 @@ class X64Emitter : public Xbyak::CodeGenerator {
   size_t stack_size() const { return stack_size_; }
 
  protected:
-  void* Emplace(size_t stack_size, GuestFunction* function = nullptr);
-  bool Emit(hir::HIRBuilder* builder, size_t* out_stack_size);
+  void* Emplace(const EmitFunctionInfo& func_info,
+                GuestFunction* function = nullptr);
+  bool Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info);
   void EmitGetCurrentThreadId();
   void EmitTraceUserCallReturn();
 

@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -22,17 +22,20 @@ namespace vfs {
 
 class Device {
  public:
-  explicit Device(const std::string& path);
+  explicit Device(const std::string_view mount_path);
   virtual ~Device();
 
   virtual bool Initialize() = 0;
-  void Dump(StringBuffer* string_buffer);
 
   const std::string& mount_path() const { return mount_path_; }
-
   virtual bool is_read_only() const { return true; }
 
-  Entry* ResolvePath(std::string path);
+  virtual void Dump(StringBuffer* string_buffer) = 0;
+  virtual Entry* ResolvePath(const std::string_view path) = 0;
+
+  virtual const std::string& name() const = 0;
+  virtual uint32_t attributes() const = 0;
+  virtual uint32_t component_name_max_length() const = 0;
 
   virtual uint32_t total_allocation_units() const = 0;
   virtual uint32_t available_allocation_units() const = 0;
@@ -42,7 +45,6 @@ class Device {
  protected:
   xe::global_critical_region global_critical_region_;
   std::string mount_path_;
-  std::unique_ptr<Entry> root_entry_;
 };
 
 }  // namespace vfs

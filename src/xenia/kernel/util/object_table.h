@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "xenia/base/mutex.h"
+#include "xenia/base/string_key.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/xbox.h"
 
@@ -50,16 +51,15 @@ class ObjectTable {
   object_ref<T> LookupObject(X_HANDLE handle) {
     auto object = LookupObject(handle, false);
     if (object) {
-      assert_true(object->type() == T::kType);
+      assert_true(object->type() == T::kObjectType);
     }
-
     auto result = object_ref<T>(reinterpret_cast<T*>(object));
     return result;
   }
 
-  X_STATUS AddNameMapping(const std::string& name, X_HANDLE handle);
-  void RemoveNameMapping(const std::string& name);
-  X_STATUS GetObjectByName(const std::string& name, X_HANDLE* out_handle);
+  X_STATUS AddNameMapping(const std::string_view name, X_HANDLE handle);
+  void RemoveNameMapping(const std::string_view name);
+  X_STATUS GetObjectByName(const std::string_view name, X_HANDLE* out_handle);
   template <typename T>
   std::vector<object_ref<T>> GetObjectsByType(XObject::Type type) {
     std::vector<object_ref<T>> results;
@@ -72,7 +72,7 @@ class ObjectTable {
   std::vector<object_ref<T>> GetObjectsByType() {
     std::vector<object_ref<T>> results;
     GetObjectsByType(
-        T::kType,
+        T::kObjectType,
         reinterpret_cast<std::vector<object_ref<XObject>>*>(&results));
     return results;
   }
@@ -81,10 +81,10 @@ class ObjectTable {
   void PurgeAllObjects();  // Purges the object table of all guest objects
 
  private:
-  typedef struct {
+  struct ObjectTableEntry {
     int handle_ref_count = 0;
     XObject* object = nullptr;
-  } ObjectTableEntry;
+  };
 
   ObjectTableEntry* LookupTable(X_HANDLE handle);
   XObject* LookupObject(X_HANDLE handle, bool already_locked);
@@ -92,6 +92,9 @@ class ObjectTable {
                         std::vector<object_ref<XObject>>* results);
 
   X_HANDLE TranslateHandle(X_HANDLE handle);
+  static constexpr uint32_t GetHandleSlot(X_HANDLE handle) {
+    return (handle - XObject::kHandleBase) >> 2;
+  }
   X_STATUS FindFreeSlot(uint32_t* out_slot);
   bool Resize(uint32_t new_capacity);
 
@@ -99,7 +102,7 @@ class ObjectTable {
   uint32_t table_capacity_ = 0;
   ObjectTableEntry* table_ = nullptr;
   uint32_t last_free_entry_ = 0;
-  std::unordered_map<std::string, X_HANDLE> name_table_;
+  std::unordered_map<string_key_case, X_HANDLE> name_table_;
 };
 
 // Generic lookup

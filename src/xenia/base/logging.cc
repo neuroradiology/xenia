@@ -2,25 +2,30 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2013 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
 
 #include "xenia/base/logging.h"
 
-#include <gflags/gflags.h>
-
 #include <atomic>
-#include <cinttypes>
-#include <cstdarg>
 #include <mutex>
 #include <vector>
 
+#include "third_party/disruptorplus/include/disruptorplus/multi_threaded_claim_strategy.hpp"
+#include "third_party/disruptorplus/include/disruptorplus/ring_buffer.hpp"
+#include "third_party/disruptorplus/include/disruptorplus/sequence_barrier.hpp"
+#include "third_party/disruptorplus/include/disruptorplus/spin_wait_strategy.hpp"
+#include "xenia/base/atomic.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/debugging.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/main.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/ring_buffer.h"
+#include "xenia/base/string.h"
 #include "xenia/base/threading.h"
 
 // For MessageBox:
@@ -29,202 +34,330 @@
 #include "xenia/base/platform_win.h"
 #endif  // XE_PLATFORM_WIN32
 
-DEFINE_string(log_file, "",
-              "Logs are written to the given file instead of the default.");
-DEFINE_bool(flush_log, true, "Flush log file after each log line batch.");
+#include "third_party/fmt/include/fmt/format.h"
+
+DEFINE_path(log_file, "", "Logs are written to the given file", "Logging");
+DEFINE_bool(log_to_stdout, true, "Write log output to stdout", "Logging");
+DEFINE_bool(log_to_debugprint, false, "Dump the log to DebugPrint.", "Logging");
+DEFINE_bool(flush_log, true, "Flush log file after each log line batch.",
+            "Logging");
+DEFINE_int32(
+    log_level, 2,
+    "Maximum level to be logged. (0=error, 1=warning, 2=info, 3=debug)",
+    "Logging");
+
+namespace dp = disruptorplus;
 
 namespace xe {
 
 class Logger;
 
 Logger* logger_ = nullptr;
-thread_local std::vector<char> log_format_buffer_(64 * 1024);
+
+struct LogLine {
+  size_t buffer_length;
+  uint32_t thread_id;
+  uint16_t _pad_0;  // (2b) padding
+  uint8_t _pad_1;   // (1b) padding
+  char prefix_char;
+};
+
+thread_local char thread_log_buffer_[64 * 1024];
+
+void FileLogSink::Write(const char* buf, size_t size) {
+  if (file_) {
+    fwrite(buf, 1, size, file_);
+  }
+}
+
+void FileLogSink::Flush() {
+  if (file_) {
+    fflush(file_);
+  }
+}
 
 class Logger {
  public:
-  explicit Logger(const std::wstring& app_name)
-      : ring_buffer_(buffer_, kBufferSize), running_(true) {
-    if (!FLAGS_log_file.empty()) {
-      auto file_path = xe::to_wstring(FLAGS_log_file.c_str());
-      xe::filesystem::CreateParentFolder(file_path);
-      file_ = xe::filesystem::OpenFile(file_path, "wt");
-    } else {
-      auto file_path = app_name + L".log";
-      file_ = xe::filesystem::OpenFile(file_path, "wt");
-    }
+  explicit Logger(const std::string_view app_name)
+      : wait_strategy_(),
+        claim_strategy_(kBlockCount, wait_strategy_),
+        consumed_(wait_strategy_),
+        running_(true) {
+    claim_strategy_.add_claim_barrier(consumed_);
 
-    flush_event_ = xe::threading::Event::CreateAutoResetEvent(false);
     write_thread_ =
         xe::threading::Thread::Create({}, [this]() { WriteThread(); });
-    write_thread_->set_name("xe::FileLogSink Writer");
+    write_thread_->set_name("Logging Writer");
   }
 
   ~Logger() {
     running_ = false;
-    flush_event_->Set();
     xe::threading::Wait(write_thread_.get(), true);
-    fflush(file_);
-    fclose(file_);
   }
 
-  void AppendLine(uint32_t thread_id, const char level_char, const char* buffer,
-                  size_t buffer_length) {
-    LogLine line;
-    line.thread_id = thread_id;
-    line.level_char = level_char;
-    line.buffer_length = buffer_length;
-    while (true) {
-      mutex_.lock();
-      if (ring_buffer_.write_count() < sizeof(line) + buffer_length) {
-        // Buffer is full. Stall.
-        mutex_.unlock();
-        xe::threading::MaybeYield();
-        continue;
-      }
-      ring_buffer_.Write(&line, sizeof(LogLine));
-      ring_buffer_.Write(buffer, buffer_length);
-      mutex_.unlock();
-      break;
-    }
-    flush_event_->Set();
+  void AddLogSink(std::unique_ptr<LogSink>&& sink) {
+    sinks_.push_back(std::move(sink));
   }
 
  private:
-  static const size_t kBufferSize = 32 * 1024 * 1024;
+  static const size_t kBufferSize = 8 * 1024 * 1024;
+  uint8_t buffer_[kBufferSize];
 
-  struct LogLine {
-    uint32_t thread_id;
-    char level_char;
-    size_t buffer_length;
-  };
+  static const size_t kBlockSize = 256;
+  static const size_t kBlockCount = kBufferSize / kBlockSize;
+  static const size_t kBlockIndexMask = kBlockCount - 1;
 
-  void WriteThread() {
-    while (running_) {
-      mutex_.lock();
-      bool did_write = false;
-      while (!ring_buffer_.empty()) {
-        did_write = true;
+  static const size_t kClaimStrategyFootprint =
+      sizeof(std::atomic<dp::sequence_t>[kBlockCount]);
 
-        // Read line header and write out the line prefix.
-        LogLine line;
-        ring_buffer_.Read(&line, sizeof(line));
-        char prefix[] = {
-            line.level_char,
-            '>',
-            ' ',
-            '0',  // Thread ID gets placed here (8 chars).
-            '0',
-            '0',
-            '0',
-            '0',
-            '0',
-            '0',
-            '0',
-            ' ',
-            0,
-        };
-        std::snprintf(prefix + 3, sizeof(prefix) - 3, "%08" PRIX32 " ",
-                      line.thread_id);
-        fwrite(prefix, 1, sizeof(prefix) - 1, file_);
-        if (line.buffer_length) {
-          // Get access to the line data - which may be split in the ring buffer
-          // - and write it out in parts.
-          auto line_range = ring_buffer_.BeginRead(line.buffer_length);
-          fwrite(line_range.first, 1, line_range.first_length, file_);
-          if (line_range.second_length) {
-            fwrite(line_range.second, 1, line_range.second_length, file_);
-          }
-          // Always ensure there is a newline.
-          char last_char = line_range.second
-                               ? line_range.second[line_range.second_length - 1]
-                               : line_range.first[line_range.first_length - 1];
-          if (last_char != '\n') {
-            const char suffix[1] = {'\n'};
-            fwrite(suffix, 1, sizeof(suffix), file_);
-          }
-          ring_buffer_.EndRead(std::move(line_range));
-        } else {
-          const char suffix[1] = {'\n'};
-          fwrite(suffix, 1, sizeof(suffix), file_);
-        }
-      }
-      mutex_.unlock();
-      if (did_write) {
-        if (FLAGS_flush_log) {
-          fflush(file_);
-        }
-      }
-      xe::threading::Wait(flush_event_.get(), true);
+  static size_t BlockOffset(dp::sequence_t sequence) {
+    return (sequence & kBlockIndexMask) * kBlockSize;
+  }
+
+  static size_t BlockCount(size_t byte_size) {
+    return (byte_size + (kBlockSize - 1)) / kBlockSize;
+  }
+
+  dp::spin_wait_strategy wait_strategy_;
+  dp::multi_threaded_claim_strategy<dp::spin_wait_strategy> claim_strategy_;
+  dp::sequence_barrier<dp::spin_wait_strategy> consumed_;
+
+  std::vector<std::unique_ptr<LogSink>> sinks_;
+
+  std::atomic<bool> running_;
+  std::unique_ptr<xe::threading::Thread> write_thread_;
+
+  void Write(const char* buf, size_t size) {
+    for (const auto& sink : sinks_) {
+      sink->Write(buf, size);
+    }
+    if (cvars::log_to_debugprint) {
+      debugging::DebugPrint("{}", std::string_view(buf, size));
     }
   }
 
-  FILE* file_ = nullptr;
-  uint8_t buffer_[kBufferSize];
-  RingBuffer ring_buffer_;
-  std::mutex mutex_;
-  std::atomic<bool> running_;
-  std::unique_ptr<xe::threading::Event> flush_event_;
-  std::unique_ptr<xe::threading::Thread> write_thread_;
+  void WriteThread() {
+    RingBuffer rb(buffer_, kBufferSize);
+
+    size_t idle_loops = 0;
+
+    dp::sequence_t next_sequence = 0;
+    dp::sequence_t last_sequence = -1;
+
+    size_t desired_count = 1;
+    while (true) {
+      // We want one block to find out how many blocks we need or we know how
+      // many blocks needed for at least one log line.
+      auto next_range = dp::sequence_range(next_sequence, desired_count);
+
+      auto available_sequence = claim_strategy_.wait_until_published(
+          next_range.last(), last_sequence);
+
+      auto available_difference =
+          dp::difference(available_sequence, next_sequence);
+
+      size_t read_count = 0;
+
+      if (available_difference > 0 &&
+          static_cast<size_t>(available_difference) >= desired_count) {
+        auto available_range = dp::sequence_range(
+            next_sequence, static_cast<size_t>(available_difference));
+        auto available_count = available_range.size();
+
+        rb.set_write_offset(BlockOffset(available_range.end()));
+
+        for (size_t i = available_range.first(); i != available_range.end();) {
+          rb.set_read_offset(BlockOffset(i));
+
+          LogLine line;
+          rb.Read(&line, sizeof(line));
+
+          auto needed_count = BlockCount(sizeof(LogLine) + line.buffer_length);
+          if (read_count + needed_count > available_count) {
+            // More blocks are needed for a complete line.
+            desired_count = needed_count;
+            break;
+          } else {
+            // Enough blocks to read this log line, advance by that many.
+            read_count += needed_count;
+            i += needed_count;
+
+            char prefix[] = {
+                line.prefix_char,
+                '>',
+                ' ',
+                '?',  // Thread ID gets placed here (8 chars).
+                '?',
+                '?',
+                '?',
+                '?',
+                '?',
+                '?',
+                '?',
+                ' ',
+                0,
+            };
+            fmt::format_to_n(prefix + 3, sizeof(prefix) - 3, "{:08X}",
+                             line.thread_id);
+            Write(prefix, sizeof(prefix) - 1);
+
+            if (line.buffer_length) {
+              // Get access to the line data - which may be split in the ring
+              // buffer - and write it out in parts.
+              auto line_range = rb.BeginRead(line.buffer_length);
+              Write(reinterpret_cast<const char*>(line_range.first),
+                    line_range.first_length);
+              if (line_range.second_length) {
+                Write(reinterpret_cast<const char*>(line_range.second),
+                      line_range.second_length);
+              }
+
+              // Always ensure there is a newline.
+              char last_char =
+                  line_range.second
+                      ? line_range.second[line_range.second_length - 1]
+                      : line_range.first[line_range.first_length - 1];
+              if (last_char != '\n') {
+                const char suffix[1] = {'\n'};
+                Write(suffix, 1);
+              }
+
+              rb.EndRead(std::move(line_range));
+            } else {
+              // Always ensure there is a newline.
+              const char suffix[1] = {'\n'};
+              Write(suffix, 1);
+            }
+          }
+        }
+      }
+
+      if (read_count) {
+        // Advance by the number of blocks we read.
+        auto read_range = dp::sequence_range(next_sequence, read_count);
+        next_sequence = read_range.end();
+        last_sequence = read_range.last();
+        consumed_.publish(read_range.last());
+
+        desired_count = 1;
+
+        if (cvars::flush_log) {
+          for (const auto& sink : sinks_) {
+            sink->Flush();
+          }
+        }
+
+        idle_loops = 0;
+      } else {
+        if (!running_) {
+          break;
+        }
+        if (idle_loops >= 1000) {
+          // Introduce a waiting period.
+          xe::threading::Sleep(std::chrono::milliseconds(50));
+        } else {
+          idle_loops++;
+        }
+      }
+    }
+  }
+
+ public:
+  void AppendLine(uint32_t thread_id, const char prefix_char,
+                  const char* buffer_data, size_t buffer_length) {
+    size_t count = BlockCount(sizeof(LogLine) + buffer_length);
+
+    auto range = claim_strategy_.claim(count);
+    assert_true(range.size() == count);
+
+    RingBuffer rb(buffer_, kBufferSize);
+    rb.set_write_offset(BlockOffset(range.first()));
+    rb.set_read_offset(BlockOffset(range.end()));
+
+    LogLine line = {};
+    line.buffer_length = buffer_length;
+    line.thread_id = thread_id;
+    line.prefix_char = prefix_char;
+
+    rb.Write(&line, sizeof(LogLine));
+    rb.Write(buffer_data, buffer_length);
+
+    claim_strategy_.publish(range);
+  }
 };
 
-void InitializeLogging(const std::wstring& app_name) {
-  // We leak this intentionally - lots of cleanup code needs it.
-  logger_ = new Logger(app_name);
-}
+void InitializeLogging(const std::string_view app_name) {
+  auto mem = memory::AlignedAlloc<Logger>(0x10);
+  logger_ = new (mem) Logger(app_name);
 
-void LogLineFormat(const char level_char, const char* fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  size_t chars_written = vsnprintf(log_format_buffer_.data(),
-                                   log_format_buffer_.capacity(), fmt, args);
-  va_end(args);
-  if (chars_written != std::string::npos) {
-    logger_->AppendLine(xe::threading::current_thread_id(), level_char,
-                        log_format_buffer_.data(), chars_written);
+  FILE* log_file = nullptr;
+
+  if (cvars::log_file.empty()) {
+    // Default to app name.
+    auto file_name = fmt::format("{}.log", app_name);
+    auto file_path = std::filesystem::path(file_name);
+    xe::filesystem::CreateParentFolder(file_path);
+
+    log_file = xe::filesystem::OpenFile(file_path, "wt");
   } else {
-    logger_->AppendLine(xe::threading::current_thread_id(), level_char, fmt,
-                        std::strlen(fmt));
+    xe::filesystem::CreateParentFolder(cvars::log_file);
+    log_file = xe::filesystem::OpenFile(cvars::log_file, "wt");
+  }
+  auto sink = std::make_unique<FileLogSink>(log_file);
+  logger_->AddLogSink(std::move(sink));
+
+  if (cvars::log_to_stdout) {
+    auto stdout_sink = std::make_unique<FileLogSink>(stdout);
+    logger_->AddLogSink(std::move(stdout_sink));
   }
 }
 
-void LogLineVarargs(const char level_char, const char* fmt, va_list args) {
-  size_t chars_written = vsnprintf(log_format_buffer_.data(),
-                                   log_format_buffer_.capacity(), fmt, args);
-  logger_->AppendLine(xe::threading::current_thread_id(), level_char,
-                      log_format_buffer_.data(), chars_written);
+void ShutdownLogging() {
+  Logger* logger = logger_;
+  logger_ = nullptr;
+
+  logger->~Logger();
+  memory::AlignedFree(logger);
 }
 
-void LogLine(const char level_char, const char* str, size_t str_length) {
-  logger_->AppendLine(
-      xe::threading::current_thread_id(), level_char, str,
-      str_length == std::string::npos ? std::strlen(str) : str_length);
+bool logging::internal::ShouldLog(LogLevel log_level) {
+  return logger_ != nullptr &&
+         static_cast<int32_t>(log_level) <= cvars::log_level;
 }
 
-void LogLine(const char level_char, const std::string& str) {
-  logger_->AppendLine(xe::threading::current_thread_id(), level_char,
-                      str.c_str(), str.length());
+std::pair<char*, size_t> logging::internal::GetThreadBuffer() {
+  return {thread_log_buffer_, sizeof(thread_log_buffer_)};
 }
 
-void FatalError(const char* fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  LogLineVarargs('X', fmt, args);
-  va_end(args);
+void logging::internal::AppendLogLine(LogLevel log_level,
+                                      const char prefix_char, size_t written) {
+  if (!ShouldLog(log_level) || !written) {
+    return;
+  }
+  logger_->AppendLine(xe::threading::current_thread_id(), prefix_char,
+                      thread_log_buffer_, written);
+}
+
+void logging::AppendLogLine(LogLevel log_level, const char prefix_char,
+                            const std::string_view str) {
+  if (!internal::ShouldLog(log_level) || !str.size()) {
+    return;
+  }
+  logger_->AppendLine(xe::threading::current_thread_id(), prefix_char,
+                      str.data(), str.size());
+}
+
+void FatalError(const std::string_view str) {
+  logging::AppendLogLine(LogLevel::Error, 'X', str);
 
 #if XE_PLATFORM_WIN32
   if (!xe::has_console_attached()) {
-    va_start(args, fmt);
-    vsnprintf(log_format_buffer_.data(), log_format_buffer_.capacity(), fmt,
-              args);
-    va_end(args);
-    MessageBoxA(NULL, log_format_buffer_.data(), "Xenia Error",
+    MessageBoxW(NULL, (LPCWSTR)xe::to_utf16(str).c_str(), L"Xenia Error",
                 MB_OK | MB_ICONERROR | MB_APPLMODAL | MB_SETFOREGROUND);
   }
 #endif  // WIN32
-
-  exit(1);
+  ShutdownLogging();
+  std::exit(1);
 }
-
-void FatalError(const std::string& str) { FatalError(str.c_str()); }
 
 }  // namespace xe

@@ -7,13 +7,13 @@ project("xenia-ui-spirv")
   kind("StaticLib")
   language("C++")
   links({
+    "glslang-spirv",
     "spirv-tools",
     "xenia-base",
   })
   defines({
   })
   includedirs({
-    project_root.."/third_party/gflags/src",
     project_root.."/third_party/spirv-tools/external/include",
   })
   local_platform_files()

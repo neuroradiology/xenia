@@ -6,10 +6,7 @@
 	url = https://github.com/ocornut/imgui.git
 [submodule "third_party/binutils-ppc-cygwin"]
 	path = third_party/binutils-ppc-cygwin
-	url = https://github.com/benvanik/binutils-ppc-cygwin
-[submodule "third_party/capstone"]
-	path = third_party/capstone
-	url = https://github.com/xenia-project/capstone.git
+	url = https://github.com/benvanik/binutils-ppc-cygwin.git
 [submodule "third_party/libav"]
 	path = third_party/libav
 	url = https://github.com/xenia-project/libav.git
@@ -18,19 +15,64 @@
 	url = https://github.com/xenia-project/SPIRV-Tools.git
 [submodule "third_party/catch"]
 	path = third_party/catch
-	url = https://github.com/philsquared/Catch.git
-[submodule "third_party/gflags"]
-	path = third_party/gflags
-	url = https://github.com/benvanik/gflags.git
+	url = https://github.com/catchorg/Catch2.git
 [submodule "third_party/premake-core"]
 	path = third_party/premake-core
-	url = https://github.com/premake/premake-core.git
+	url = https://github.com/xenia-project/premake-core.git
 [submodule "third_party/snappy"]
 	path = third_party/snappy
 	url = https://github.com/xenia-project/snappy.git
 [submodule "third_party/premake-export-compile-commands"]
 	path = third_party/premake-export-compile-commands
 	url = https://github.com/xenia-project/premake-export-compile-commands.git
-[submodule "third_party/yaml-cpp"]
-	path = third_party/yaml-cpp
-	url = https://github.com/jbeder/yaml-cpp.git
+[submodule "third_party/spirv-headers"]
+	path = third_party/spirv-headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
+[submodule "third_party/volk"]
+	path = third_party/volk
+	url = https://github.com/zeux/volk.git
+[submodule "third_party/discord-rpc"]
+	path = third_party/discord-rpc
+	url = https://github.com/discordapp/discord-rpc.git
+[submodule "third_party/rapidjson"]
+	path = third_party/rapidjson
+	url = https://github.com/Tencent/rapidjson.git
+[submodule "third_party/aes_128"]
+	path = third_party/aes_128
+	url = https://github.com/openluopworld/aes_128.git
+[submodule "third_party/capstone"]
+	path = third_party/capstone
+	url = https://github.com/xenia-project/capstone.git
+[submodule "third_party/cpptoml"]
+	path = third_party/cpptoml
+	url = https://github.com/skystrife/cpptoml.git
+[submodule "third_party/cxxopts"]
+	path = third_party/cxxopts
+	url = https://github.com/jarro2783/cxxopts.git
+[submodule "third_party/SDL2"]
+	path = third_party/SDL2
+	url = https://github.com/JoelLinn/SDL.git
+[submodule "third_party/utfcpp"]
+	path = third_party/utfcpp
+	url = https://github.com/xenia-project/utfcpp.git
+[submodule "third_party/fmt"]
+	path = third_party/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "third_party/disruptorplus"]
+	path = third_party/disruptorplus
+	url = https://github.com/xenia-project/disruptorplus.git
+[submodule "third_party/DirectXShaderCompiler"]
+	path = third_party/DirectXShaderCompiler
+	url = https://github.com/microsoft/DirectXShaderCompiler.git
+[submodule "third_party/premake-cmake"]
+	path = third_party/premake-cmake
+	url = https://github.com/Enhex/premake-cmake.git
+[submodule "third_party/premake-androidmk"]
+	path = third_party/premake-androidmk
+	url = https://github.com/Triang3l/premake-androidmk.git
+[submodule "third_party/date"]
+	path = third_party/date
+	url = https://github.com/HowardHinnant/date.git
+[submodule "third_party/xxhash"]
+	path = third_party/xxhash
+	url = https://github.com/Cyan4973/xxHash.git

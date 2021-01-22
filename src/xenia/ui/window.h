@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2014 Ben Vanik. All rights reserved.                             *
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -30,7 +30,7 @@ class ImGuiDrawer;
 
 class Window {
  public:
-  static std::unique_ptr<Window> Create(Loop* loop, const std::wstring& title);
+  static std::unique_ptr<Window> Create(Loop* loop, const std::string& title);
 
   virtual ~Window();
 
@@ -44,8 +44,11 @@ class Window {
     OnMainMenuChange();
   }
 
-  const std::wstring& title() const { return title_; }
-  virtual bool set_title(const std::wstring& title) {
+  virtual void EnableMainMenu() = 0;
+  virtual void DisableMainMenu() = 0;
+
+  const std::string& title() const { return title_; }
+  virtual bool set_title(const std::string& title) {
     if (title == title_) {
       return false;
     }
@@ -56,11 +59,17 @@ class Window {
   virtual bool SetIcon(const void* buffer, size_t size) = 0;
   void ResetIcon() { SetIcon(nullptr, 0); }
 
+  virtual bool CaptureMouse() = 0;
+  virtual bool ReleaseMouse() = 0;
+
   virtual bool is_fullscreen() const { return false; }
   virtual void ToggleFullscreen(bool fullscreen) {}
 
   virtual bool is_bordered() const { return false; }
   virtual void set_bordered(bool enabled) {}
+
+  virtual int get_dpi() const { return 96; }
+  virtual float get_dpi_scale() const { return get_dpi() / 96.f; }
 
   bool has_focus() const { return has_focus_; }
   virtual void set_focus(bool value) { has_focus_ = value; }
@@ -70,9 +79,18 @@ class Window {
 
   int32_t width() const { return width_; }
   int32_t height() const { return height_; }
-  virtual void Resize(int32_t width, int32_t height) = 0;
+  int32_t scaled_width() const { return int32_t(width_ * get_dpi_scale()); }
+  int32_t scaled_height() const { return int32_t(height_ * get_dpi_scale()); }
+
+  virtual void Resize(int32_t width, int32_t height) {
+    width_ = width;
+    height_ = height;
+  }
   virtual void Resize(int32_t left, int32_t top, int32_t right,
-                      int32_t bottom) = 0;
+                      int32_t bottom) {
+    width_ = right - left;
+    height_ = bottom - top;
+  }
 
   GraphicsContext* context() const { return context_.get(); }
   ImGuiDrawer* imgui_drawer() const { return imgui_drawer_.get(); }
@@ -102,6 +120,9 @@ class Window {
   Delegate<UIEvent*> on_painting;
   Delegate<UIEvent*> on_paint;
   Delegate<UIEvent*> on_painted;
+  Delegate<UIEvent*> on_context_lost;
+
+  Delegate<FileDropEvent*> on_file_drop;
 
   Delegate<KeyEvent*> on_key_down;
   Delegate<KeyEvent*> on_key_up;
@@ -113,7 +134,7 @@ class Window {
   Delegate<MouseEvent*> on_mouse_wheel;
 
  protected:
-  Window(Loop* loop, const std::wstring& title);
+  Window(Loop* loop, const std::string& title);
 
   void ForEachListener(std::function<void(WindowListener*)> fn);
   void TryForEachListener(std::function<bool(WindowListener*)> fn);
@@ -125,9 +146,11 @@ class Window {
   virtual void OnClose();
   virtual void OnDestroy();
 
+  virtual void OnDpiChanged(UIEvent* e);
   virtual void OnResize(UIEvent* e);
   virtual void OnLayout(UIEvent* e);
   virtual void OnPaint(UIEvent* e);
+  virtual void OnFileDrop(FileDropEvent* e);
 
   virtual void OnVisible(UIEvent* e);
   virtual void OnHidden(UIEvent* e);
@@ -148,7 +171,7 @@ class Window {
 
   Loop* loop_ = nullptr;
   std::unique_ptr<MenuItem> main_menu_;
-  std::wstring title_;
+  std::string title_;
   int32_t width_ = 0;
   int32_t height_ = 0;
   bool has_focus_ = true;
@@ -160,9 +183,9 @@ class Window {
 
   uint32_t frame_count_ = 0;
   uint32_t fps_ = 0;
-  uint64_t fps_update_time_ns_ = 0;
+  uint64_t fps_update_time_ticks_ = 0;
   uint64_t fps_frame_count_ = 0;
-  uint64_t last_paint_time_ns_ = 0;
+  uint64_t last_paint_time_ticks_ = 0;
 
   bool modifier_shift_pressed_ = false;
   bool modifier_cntrl_pressed_ = false;
